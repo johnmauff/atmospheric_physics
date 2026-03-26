@@ -1,6 +1,6 @@
 program test_kessler_driver
 
-  use kessler_mod
+  use kessler
   implicit none
 
   integer, parameter :: kind_phys = selected_real_kind(12)
@@ -19,18 +19,23 @@ program test_kessler_driver
   real(kind_phys), allocatable :: theta(:,:), qv(:,:), qc(:,:), qr(:,:)
   real(kind_phys), allocatable :: precl(:)
   real(kind_phys), allocatable :: relhum(:,:)
+  real(kind_phys), allocatable :: arr(:)
+  real(kind_phys) :: u1, u2, ztmp
 
   character(len=64)  :: scheme_name
   character(len=512) :: errmsg
   integer            :: errflg
+  integer, allocatable :: seed_values(:)
+  integer :: seed_size
+
 
   integer :: i, k
 
   !------------------------------------------------------
   ! Set grid size
   !------------------------------------------------------
-  ncol = 16
-  nz   = 36
+  ncol = 128
+  nz   = 56
   dt   = 60.0_kind_phys
 
   lyr_surf = 1
@@ -58,7 +63,27 @@ program test_kessler_driver
   allocate(theta(ncol,nz), qv(ncol,nz), qc(ncol,nz), qr(ncol,nz))
   allocate(precl(ncol))
   allocate(relhum(ncol,nz))
+  allocate(arr(ncol))
 
+  ! Query the size of the RNG state
+  call random_seed(size=seed_size)
+  allocate(seed_values(seed_size))
+
+  ! Fill with fixed values for deterministic sequence
+  seed_values = [(i, i=1, seed_size)]  ! or any fixed sequence
+
+  ! Set the seed
+  call random_seed(put=seed_values)
+
+  do i = 1, ncol
+     ! Box-Muller transform to generate standard normal
+     call random_number(u1)
+     call random_number(u2)
+     ztmp = sqrt(-2.0 * log(u1)) * cos(2.0 * 3.14159265 * u2)
+
+     ! Scale to mean=1, stddev=0.1
+     arr(i) = 1.0 + 0.1 * ztmp
+  end do
   !------------------------------------------------------
   ! Simple initialization
   !------------------------------------------------------
@@ -68,21 +93,18 @@ program test_kessler_driver
         cpair(i,k) = 1004.0_kind_phys
         rair(i,k)  = 287.0_kind_phys
 
-        z(i,k)   = 100.0_kind_phys * real(k-1, kind_phys)
-        rho(i,k) = 1.2_kind_phys * exp(-z(i,k)/8000.0_kind_phys)
+        z(i,k)   = arr(i) * (100.0_kind_phys * real(k-1, kind_phys))
+        rho(i,k) = arr(i) * (1.2_kind_phys * exp(-z(i,k)/8000.0_kind_phys))
 
-        pk(i,k)    = 1.0_kind_phys
-        theta(i,k) = 300.0_kind_phys - 0.006_kind_phys*z(i,k)
+        pk(i,k)    = arr(i) * (1.0_kind_phys)
+        theta(i,k) = arr(i) * (300.0_kind_phys - 0.006_kind_phys*z(i,k))
 
-        qv(i,k) = 0.010_kind_phys
-        qc(i,k) = 0.0_kind_phys
-        qr(i,k) = 0.0_kind_phys
+        qv(i,k) = arr(i) * (0.010_kind_phys)
+        qc(i,k) = arr(i) * (0.01_kind_phys)
+        qr(i,k) = arr(i) * (0.01_kind_phys)
 
      end do
   end do
-
-  precl  = 0.0_kind_phys
-  relhum = 0.0_kind_phys
 
   !------------------------------------------------------
   ! Run microphysics
@@ -96,7 +118,12 @@ program test_kessler_driver
      print *, 'Run error: ', trim(errmsg)
   else
      print *, 'Scheme name: ', trim(scheme_name)
+     print *, 'theta: ', SUM(theta)
+     print *, 'qv: ', SUM(qv)
+     print *, 'qc: ', SUM(qc)
+     print *, 'qr: ', SUM(qr)
      print *, 'Precip (m/s): ', SUM(precl)
+     print *, 'relnum: ', SUM(relhum)
   end if
 
 end program test_kessler_driver

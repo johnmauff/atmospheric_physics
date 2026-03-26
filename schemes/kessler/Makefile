@@ -1,59 +1,61 @@
 # ============================================================
-# GNU Fortran Makefile for Kessler test driver
+# Minimal Fortran Makefile (explicit ordering, no magic)
 # ============================================================
 
-# Compiler
-FC       = gfortran
-
-# Executable name
-TARGET   = test_kessler
-
-# Source files
-SRCS     = kessler.F90 \
-           test_kessler_driver.F90
-
-# Object files (automatic)
-OBJS     = $(SRCS:.F90=.o)
-
-# Default build type
-BUILD    ?= release
+# ընտր compiler: gfortran or nvhpc
+#COMPILER ?= gfortran
+COMPILER ?= nvhpc
 
 # ------------------------------------------------------------
-# Compiler flags
+# Compiler selection
 # ------------------------------------------------------------
 
-ifeq ($(BUILD),debug)
-  FFLAGS = -g -O0 -Wall -Wextra -fcheck=all -fbacktrace -ffpe-trap=invalid,zero,overflow
-else
-  FFLAGS = -O3 -march=native -Wall
+ifeq ($(COMPILER),gnu)
+  FC = gfortran
+  FFLAGS = -O3 -Wall -cpp
 endif
 
-# Preprocessing enabled because files use .F90
-CPPFLAGS = -cpp
+ifeq ($(COMPILER),nvhpc)
+  FC = nvfortran
+  FFLAGS = -O3 -Mpreprocess
+endif
 
 # ------------------------------------------------------------
-# Build rules
+# Target
+# ------------------------------------------------------------
+
+TARGET = test_kessler
+
+# ------------------------------------------------------------
+# Build (EXPLICIT ORDER — THIS IS THE KEY)
 # ------------------------------------------------------------
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS)
-	$(FC) $(FFLAGS) -o $@ $(OBJS)
+compare: 
+	./test_kessler >& test.$(COMPILER).log
+	diff test.$(COMPILER).log golden.$(COMPILER).log
 
-%.o: %.F90
-	$(FC) $(FFLAGS) $(CPPFLAGS) -c $<
+$(TARGET): ccpp_kinds.o kessler.o driver_kessler.o
+	$(FC) $(FFLAGS) -o $(TARGET) \
+	    ccpp_kinds.o kessler.o driver_kessler.o
+
+# Compile in strict dependency order
+
+ccpp_kinds.o: ccpp_kinds.F90
+	$(FC) $(FFLAGS) -c ccpp_kinds.F90
+
+kessler.o: kessler.F90 ccpp_kinds.o
+	$(FC) $(FFLAGS) -c kessler.F90
+
+driver_kessler.o: driver_kessler.F90 kessler.o
+	$(FC) $(FFLAGS) -c driver_kessler.F90
 
 # ------------------------------------------------------------
-# Utility targets
+# تنظيف
 # ------------------------------------------------------------
-
-debug:
-	$(MAKE) BUILD=debug
-
-release:
-	$(MAKE) BUILD=release
 
 clean:
 	rm -f *.o *.mod $(TARGET)
 
-.PHONY: all clean debug release
+.PHONY: all clean
