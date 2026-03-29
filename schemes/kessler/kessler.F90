@@ -127,7 +127,7 @@ CONTAINS
                          sed(ncol,nz),       &          ! Sedimentation rate
                          pc(ncol,nz)                   ! Parameter: 3.8 hPa / pressure (in hPa)
 
-      real(kind_phys) :: f5,            &          ! Parameter for the computation of the condensation rate
+      real(kind_phys) :: f5(ncol,nz),   &          ! Parameter for the computation of the condensation rate
                          f2x,           &          ! Parameter for the computation of the saturation mixing ratio
                          xk,            &          ! 1/kappa = cp/R
                          ern,           &          ! Evaporization rate of rain water
@@ -142,7 +142,9 @@ CONTAINS
 
       integer         :: col, klev                 ! Column and level indices
       integer         :: lyr_step                  ! Increment to move up a level
+      integer         :: colError
       logical         :: all_converged
+      real(kind_phys) :: dtmin
 
       ! Initialize output variables
       precl = 0._kind_phys
@@ -171,10 +173,13 @@ CONTAINS
 
       ! Loop through columns
 
-      do concurrent(col=1:ncol, klev=lyr_surf:lyr_toa:lyr_step)
+      !$acc data copyin(cpair,rair,rho,pk) copyout(r,pc,velqr,f5) copy(rhalf,qr)
+      !$acc parallel loop collapse(2) private(xk)
+      do col =1,ncol
+         do klev=lyr_surf, lyr_toa, lyr_step
 
             !Calculate constants:
-            f5  = 4093._kind_phys * lv / cpair(col,klev) ! constant for the condensation rate
+            f5(col,klev)  = 4093._kind_phys * lv / cpair(col,klev) ! constant for the condensation rate
             xk  = cpair(col,klev) / rair(col,klev)       ! 1/kappa = cp/R
 
             r(col,klev)     = 0.001_kind_phys * rho(col, klev)
@@ -190,30 +195,65 @@ CONTAINS
             ! Liquid water terminal velocity (m/s) following Klemp and Wilhelmson (1978), Eq. (2.15)
             velqr(col,klev)  = 36.34_kind_phys * rhalf(col,klev) *          &
                  (qr(col, klev) * r(col,klev))**0.1364_kind_phys
+        enddo
       enddo
+      !$acc end data
 
-      do concurrent(col=1:ncol)
+      !$acc data copyout(dt0,mask)
+      !$acc parallel loop 
+      do col=1,ncol
          dt0(col)  = dt
          mask(col) = 1.0
       enddo
-      ! Compute maximum time step size in accordance with CFL condition
-      do concurrent (col=1:ncol, klev=lyr_surf:lyr_toa - lyr_step:lyr_step)
-         ! NB: Original test for velqr /= 0 numerically unstable
-         if (abs(velqr(col,klev)) > 1.0E-12_kind_phys) then
-            dt0(col) = min(dt0(col), 0.8_kind_phys*(z(col, klev+lyr_step) - &
-                 z(col, klev)) / velqr(col,klev))
-         end if
-      enddo
+      !$acc end data
 
+      !print *,'(HOST) lyr_surf,lyr_toa,lyr_step: ',lyr_surf,lyr_toa,lyr_step
+      !print *,'(HOST) dt0: ',dt0(1)
+      !print *,'(HOST) mask: ',mask(1)
+      !$acc parallel
+         !print *,'(DEVICE) lyr_surf,lyr_toa,lyr_step: ',lyr_surf,lyr_toa,lyr_step
+         !print *,'(DEVICE) dt0: ',dt0(1)
+         !print *,'(DEVICE) mask: ',mask(1)
+      !$acc end parallel
+
+      !$acc data copyin(velqr,z) copy(dt0)
+      ! Compute maximum time step size in accordance with CFL condition
+      !$acc parallel loop private(dtmin)
+      do col=1,ncol
+         dtmin = dt0(col)
+         !$acc loop reduction(min:dtmin)
+         do  klev=lyr_surf,lyr_toa - lyr_step,lyr_step
+           ! NB: Original test for velqr /= 0 numerically unstable
+           if (abs(velqr(col,klev)) > 1.0E-12_kind_phys) then
+              dtmin = min(dtmin, 0.8_kind_phys*(z(col, klev+lyr_step) - &
+                  z(col, klev)) / velqr(col,klev))
+           end if
+         enddo
+         dt0(col) = dtmin
+         !print *,'(DEVICE) dt0: ',dt0(1)
+      enddo
+      !$acc end data 
+      !print *,'dt0: ', dt0
+
+      !$acc data copyin(dt0)
+      !$acc parallel loop
       do col = 1, ncol
          ! Check the time step dt0
          if (dt0(col) <  1.0E-12_kind_phys) then
-            write(errmsg, *) 'KESSLER: bad time splitting ',dt,dt0(col)
+            !$acc atomic write
+            colError = col
+            !$acc atomic write
             errflg = 1
-            return
          end if
       enddo
+      !$acc end data
+      if(errflg .eq. 1) then 
+         write(errmsg, *) 'KESSLER: bad time splitting ',dt,dt0(colError)
+         return
+       endif
 
+      !$acc data copyout(time_counter,precl_acc)
+      !$acc parallel loop
       do col = 1, ncol
          ! time counter keeps track of the elapsed time during the subcycling process
          time_counter(col) = 0.0_kind_phys
@@ -221,12 +261,15 @@ CONTAINS
          ! initialize time-weighted accumulated precipitation
          precl_acc(col) = 0.0_kind_phys
       enddo
+      !$acc end data
       all_converged = .FALSE.
       ! Subcycle through the Kessler moisture processes,
       ! time loop ends when the physics time step is reached (within a margin of 1e-5 s)
       ! do while ( abs(dt - time_counter(col)) > 1.0E-5_kind_phys)
       do while ( .not. all_converged)
 
+         !$acc data copyin(rho,qr,velqr,mask,dt0) copyout(precl) copy(precl_acc)
+         !$acc parallel loop
          do col = 1, ncol
             ! Precipitation rate (m_water/s) over the subcycled time step
             precl(col) = rho(col, lyr_surf) * qr(col, lyr_surf) * velqr(col,lyr_surf) / rhoqr
@@ -235,8 +278,11 @@ CONTAINS
             ! (weighted with the subcycled time step), unit is m_water
             precl_acc(col) = precl_acc(col) + mask(col)*(precl(col) * dt0(col))
          enddo
+         !$acc end data
 
+         !$acc data copyin(dt0,r,qr,velqr,z) copyout(sed)
          ! Mass-weighted sedimentation term using upstream differencing
+         !$acc parallel loop 
          do col = 1, ncol
             do klev = lyr_surf, lyr_toa - lyr_step, lyr_step
                sed(col,klev) = dt0(col) *                                                           &
@@ -245,12 +291,19 @@ CONTAINS
                     (r(col,klev) * (z(col, klev+lyr_step) - z(col, klev)))
             end do
          enddo
+         !$acc end data
 
+
+         !$acc data copyin(dt0,qr,velqr,z) copy(sed)
+         !$acc parallel loop
          do col = 1, ncol
             sed(col,lyr_toa) = -dt0(col) * qr(col, lyr_toa) * velqr(col,lyr_toa) /    &
                  (0.5_kind_phys * (z(col, lyr_toa)-z(col, lyr_toa-lyr_step)))
          enddo
+         !$acc end data
 
+         !!$acc data copy(qc,qr,qc,qv,sed,pc,pk,theta,f5,r,cpair,mask,dt0)
+         !!$acc parallel loop collapse(2)
          do col = 1, ncol
             ! Adjustment terms
             do klev = lyr_surf, lyr_toa, lyr_step
@@ -269,7 +322,7 @@ CONTAINS
                qvs = pc(col,klev) * exp(f2x*(pk(col, klev)*theta(col, klev) - 273._kind_phys) / (pk(col, klev)*theta(col, klev) &
                               - 36._kind_phys))
                ! Temporary variable for the condensation rate, following Durran and Klemp (1983), Eqs. (A13-A14)
-               prod = (qv(col, klev) - qvs) / (1._kind_phys + qvs*f5 / (pk(col, klev)*theta(col, klev) - 36._kind_phys)**2)
+               prod = (qv(col, klev) - qvs) / (1._kind_phys + qvs*f5(col,klev) / (pk(col, klev)*theta(col, klev) - 36._kind_phys)**2)
 
                ! Evaporation rate following Klemp and Wilhelmson (1978) Eq. (2.14a,b), also Durran and Klemp (1983) Eqs. (A8-A9)
                ern = min(dt0(col) * (((1.6_kind_phys + 124.9_kind_phys*(r(col,klev)*qr(col, klev))**.2046_kind_phys) * &
@@ -287,7 +340,10 @@ CONTAINS
                              + (1._kind_phys - mask(col))*qr(col, klev)
             end do
           enddo
+          !!$acc end data
 
+          !$acc data copy(time_counter,mask,dt0)
+          !$acc parallel loop
           do col = 1, ncol
           ! Compute the elapsed time
             time_counter(col) = time_counter(col) + mask(col) * dt0(col)
@@ -301,15 +357,21 @@ CONTAINS
                 mask(col) = 0._kind_phys
              endif
           end do ! column loop
+          !$acc end data
 
+          !$acc data copyin(rhalf,qr,r) copyout(velqr)
           ! Recalculate liquid water terminal velocity (m/s)
+          !$acc parallel loop collapse(2)
           do col = 1, ncol
              do klev = lyr_surf, lyr_toa, lyr_step
                 velqr(col,klev)  = 36.34_kind_phys * rhalf(col,klev) * (qr(col, klev)*r(col,klev))**0.1364_kind_phys
              end do
           end do ! column loop
+          !$acc end data
 
+          !$acc data copyin(z,velqr) copy(dt0)
           ! recompute the time step
+          !$acc parallel loop 
           do col = 1, ncol
              do klev = lyr_surf, lyr_toa - lyr_step, lyr_step
                 if (abs(velqr(col,klev)) > 1.0E-12_kind_phys) then
@@ -317,25 +379,34 @@ CONTAINS
                 end if
              end do
           end do ! column loop
+          !$acc end data
 
+          !$acc data copyin(mask)
           ! check to see if all columns have satisfied the condition
           all_converged = all_equal(mask,0._kind_phys)
-          !all_converged = all(mask .eq. 0._kind_phys)
+          !$acc end data
 
       end do  ! do while loop
 
-      do concurrent (col=1:ncol)
+      !$acc data copyin(pc,pk,qv,theta,precl_acc) copyout(relhum,precl)
+
+      !$acc parallel loop
+      do col=1,ncol
          ! compute the average preciptation rate over the physics time step period
          precl(col) = precl_acc(col) / dt
       end do ! column loop
 
       ! Diagnostic: relative humidity (relhum)
-      do concurrent (col = 1:ncol, klev = lyr_surf:lyr_toa:lyr_step)
+      !$acc parallel loop collapse(2)
+      do col = 1,ncol
+         do klev = lyr_surf,lyr_toa,lyr_step
             ! Saturation vapor mixing ratio (gm/gm)
             qvs = pc(col,klev) * exp(f2x*(pk(col, klev)*theta(col, klev) - 273._kind_phys) / (pk(col, klev)*theta(col, klev) &
                            - 36._kind_phys))
             relhum(col,klev) = qv(col,klev) / qvs * 100._kind_phys ! in percent
+          enddo
       end do ! column loop
+      !$acc end data
 
 
    end subroutine kessler_run
@@ -355,7 +426,7 @@ CONTAINS
 
       n = size(data)
 
-      !JMD !$acc parallel loop reduction(.and.:result)
+      !$acc parallel loop reduction(.and.:result)
       do i= 1, n
          if(data(i) .ne. val) then 
              result = .false.

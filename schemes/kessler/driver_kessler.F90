@@ -1,6 +1,9 @@
 program test_kessler_driver
 
+  use omp_lib
+  use iso_c_binding
   use kessler
+
   implicit none
 
   integer, parameter :: kind_phys = selected_real_kind(12)
@@ -28,12 +31,18 @@ program test_kessler_driver
   integer, allocatable :: seed_values(:)
   integer :: seed_size
 
+  logical :: use_host
+  integer :: dev
+  integer(c_size_t) :: bytes1D, bytes2D
+  type(c_ptr) :: cpair_raw, rair_raw, rho_raw, z_raw, pk_raw, theta_raw, &
+                 qv_raw, qc_raw, qr_raw, precl_raw, relhum_raw
 
-  integer :: i, k
+  integer :: i, k, ierr
 
   !------------------------------------------------------
   ! Set grid size
   !------------------------------------------------------
+  !ncol = 2
   ncol = 128
   nz   = 56
   dt   = 60.0_kind_phys
@@ -106,6 +115,54 @@ program test_kessler_driver
      end do
   end do
 
+
+!#ifdef USE_GPU
+#if 0
+  dev = omp_get_default_device()
+
+
+  bytes2D = ncol * nz * c_sizeof(z(1,1))
+  bytes1D = ncol * c_sizeof(precl(1))
+
+
+  ! Allocate 2D device memory
+  cpair_raw = omp_target_alloc(bytes2D, dev)
+  rair_raw = omp_target_alloc(bytes2D, dev)
+  rho_raw   = omp_target_alloc(bytes2D, dev)
+  z_raw     = omp_target_alloc(bytes2D, dev)
+  pk_raw    = omp_target_alloc(bytes2D, dev)
+  theta_raw = omp_target_alloc(bytes2D, dev)
+  qv_raw    = omp_target_alloc(bytes2D, dev)
+  qc_raw    = omp_target_alloc(bytes2D, dev)
+  qr_raw    = omp_target_alloc(bytes2D, dev)
+  relhum_raw = omp_target_alloc(bytes2D, dev)
+
+  ! Associate 2D device arrays to raw pointers
+  ierr = omp_target_associate_ptr(c_loc(cpair(1,1)), cpair_raw, bytes2D, 0_c_size_t, dev)
+  ierr = omp_target_associate_ptr(c_loc(rair(1,1)), rair_raw, bytes2D, 0_c_size_t, dev)
+  ierr = omp_target_associate_ptr(c_loc(rho(1,1)), rho_raw, bytes2D, 0_c_size_t, dev)
+  ierr = omp_target_associate_ptr(c_loc(z(1,1)), z_raw, bytes2D, 0_c_size_t, dev)
+  ierr = omp_target_associate_ptr(c_loc(pk(1,1)), pk_raw, bytes2D, 0_c_size_t, dev)
+  ierr = omp_target_associate_ptr(c_loc(theta(1,1)), theta_raw, bytes2D, 0_c_size_t, dev)
+  ierr = omp_target_associate_ptr(c_loc(qv(1,1)), qv_raw, bytes2D, 0_c_size_t, dev)
+  ierr = omp_target_associate_ptr(c_loc(qc(1,1)), qc_raw, bytes2D, 0_c_size_t, dev)
+  ierr = omp_target_associate_ptr(c_loc(qr(1,1)), qr_raw, bytes2D, 0_c_size_t, dev)
+  ierr = omp_target_associate_ptr(c_loc(relhum(1,1)), relhum_raw, bytes2D, 0_c_size_t, dev)
+
+  ! Allocate 1D device memory
+  precl_raw  = omp_target_alloc(bytes1D, dev)
+
+  ! Associate 1D device arrays to raw pointers
+  ierr = omp_target_associate_ptr(c_loc(precl(1)), precl_raw, bytes1D, 0_c_size_t, dev)
+
+
+  ! Host -> device memcpy
+  !$omp target update to(cpair(1:ncol,1:nz), rair(1:ncol,1:nz), rho(1:ncol,1:nz), &
+  !$omp      z(1:ncol,1:nz), pk(1:ncol,1:nz), theta(1:ncol,1:nz), qv(1:ncol,1:nz), &
+  !$omp      qc(1:ncol,1:nz), qr(1:ncol,1:nz), precl(1:ncol),relhum(1:ncol,1:nz))
+
+#endif
+
   !------------------------------------------------------
   ! Run microphysics
   !------------------------------------------------------
@@ -113,6 +170,13 @@ program test_kessler_driver
                    cpair, rair, rho, z, pk, &
                    theta, qv, qc, qr, &
                    precl, relhum, scheme_name, errmsg, errflg)
+
+!#ifdef USE_GPU
+#if 0
+  ! Device -> host  memcpy
+  !$omp target update from(theta(1:ncol,1:nz),qv(1:ncol,1:nz), &
+  !$omp      qc(1:ncol,1:nz),qr(1:ncol,1:nz),precl(1:ncol),relhum(1:ncol,1:nz))
+#endif
 
   if (errflg /= 0) then
      print *, 'Run error: ', trim(errmsg)
