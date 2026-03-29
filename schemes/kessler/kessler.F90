@@ -302,8 +302,8 @@ CONTAINS
          enddo
          !$acc end data
 
-         !!$acc data copy(qc,qr,qc,qv,sed,pc,pk,theta,f5,r,cpair,mask,dt0)
-         !!$acc parallel loop collapse(2)
+         !$acc data copyin(dt0,sed,pc,pk,f5,r,mask,cpair) copy(qc,qr,qv,theta)
+         !$acc parallel loop collapse(2)
          do col = 1, ncol
             ! Adjustment terms
             do klev = lyr_surf, lyr_toa, lyr_step
@@ -340,7 +340,7 @@ CONTAINS
                              + (1._kind_phys - mask(col))*qr(col, klev)
             end do
           enddo
-          !!$acc end data
+          !$acc end data
 
           !$acc data copy(time_counter,mask,dt0)
           !$acc parallel loop

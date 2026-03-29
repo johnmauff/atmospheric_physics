@@ -17,9 +17,9 @@ endif
 
 ifeq ($(COMPILER),nvhpc)
   FC = nvfortran
-  # FFLAGS = -O2 -Mpreprocess -acc=host
+  #FFLAGS = -O3 -Mpreprocess -acc=host -Mnofma
   # FFLAGS = -O3 -Mpreprocess -acc -mp=gpu -gpu=mem:separate,math_uniform -DUSE_GPU
-  FFLAGS = -O3 -Mpreprocess -acc -mp=gpu -gpu=math_uniform -Minfo=acc -DUSE_GPU
+  FFLAGS = -O3 -Mpreprocess -acc -mp=gpu -gpu=mem:separate,math_uniform,nofma -Minfo=acc -DUSE_GPU
 endif
 
 # ------------------------------------------------------------
@@ -36,7 +36,7 @@ all: $(TARGET)
 
 compare: 
 	./test_kessler >& test.$(COMPILER).log
-	diff test.$(COMPILER).log golden.$(COMPILER).log
+	diff test.$(COMPILER).log golden-nofma.$(COMPILER).log
 
 $(TARGET): ccpp_kinds.o kessler.o driver_kessler.o
 	$(FC) $(FFLAGS) -o $(TARGET) \
