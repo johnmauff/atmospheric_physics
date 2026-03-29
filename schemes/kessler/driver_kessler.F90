@@ -115,7 +115,6 @@ program test_kessler_driver
      end do
   end do
 
-
 #ifdef USE_GPU
   dev = omp_get_default_device()
 

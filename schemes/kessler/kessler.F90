@@ -171,10 +171,10 @@ CONTAINS
       !------------------------------------------------
       !   Begin calculation
       !------------------------------------------------
+      !$acc parallel
 
       ! Loop through columns
-
-      !$acc parallel loop collapse(2)
+      !$acc loop collapse(2)
       do col =1,ncol
          do klev=lyr_surf, lyr_toa, lyr_step
 
@@ -199,7 +199,7 @@ CONTAINS
       enddo
 
       ! Compute maximum time step size in accordance with CFL condition
-      !$acc parallel loop private(dtmin)
+      !$acc loop private(dtmin)
       do col=1,ncol
          dt0(col)  = dt
          mask(col) = 1.0
@@ -213,11 +213,14 @@ CONTAINS
            end if
          enddo
          dt0(col) = dtmin
-         !print *,'(DEVICE) dt0: ',dt0(1)
-      enddo
-      !print *,'dt0: ', dt0
+         ! time counter keeps track of the elapsed time during the subcycling process
+         time_counter(col) = 0.0_kind_phys
 
-      !$acc parallel loop
+         ! initialize time-weighted accumulated precipitation
+         precl_acc(col) = 0.0_kind_phys
+      enddo
+
+      !$acc loop
       do col = 1, ncol
          ! Check the time step dt0
          if (dt0(col) <  1.0E-12_kind_phys) then
@@ -227,26 +230,21 @@ CONTAINS
             errflg = 1
          end if
       enddo
+      !$acc end parallel
+
       if(errflg .eq. 1) then 
          write(errmsg, *) 'KESSLER: bad time splitting ',dt,dt0(colError)
          return
        endif
 
-      !$acc parallel loop
-      do col = 1, ncol
-         ! time counter keeps track of the elapsed time during the subcycling process
-         time_counter(col) = 0.0_kind_phys
-
-         ! initialize time-weighted accumulated precipitation
-         precl_acc(col) = 0.0_kind_phys
-      enddo
       all_converged = .FALSE.
       ! Subcycle through the Kessler moisture processes,
       ! time loop ends when the physics time step is reached (within a margin of 1e-5 s)
       ! do while ( abs(dt - time_counter(col)) > 1.0E-5_kind_phys)
       do while ( .not. all_converged)
 
-         !$acc parallel loop
+         !$acc parallel
+         !$acc loop
          do col = 1, ncol
             ! Precipitation rate (m_water/s) over the subcycled time step
             precl(col) = rho(col, lyr_surf) * qr(col, lyr_surf) * velqr(col,lyr_surf) / rhoqr
@@ -257,7 +255,7 @@ CONTAINS
          enddo
 
          ! Mass-weighted sedimentation term using upstream differencing
-         !$acc parallel loop
+         !$acc loop
          do col = 1, ncol
             do klev = lyr_surf, lyr_toa - lyr_step, lyr_step
                sed(col,klev) = dt0(col) *                                                           &
@@ -267,13 +265,13 @@ CONTAINS
             end do
          enddo
 
-         !$acc parallel loop
+         !$acc loop
          do col = 1, ncol
             sed(col,lyr_toa) = -dt0(col) * qr(col, lyr_toa) * velqr(col,lyr_toa) /    &
                  (0.5_kind_phys * (z(col, lyr_toa)-z(col, lyr_toa-lyr_step)))
          enddo
 
-         !$acc parallel loop collapse(2)
+         !$acc loop collapse(2)
          do col = 1, ncol
             ! Adjustment terms
             do klev = lyr_surf, lyr_toa, lyr_step
@@ -311,7 +309,7 @@ CONTAINS
             end do
           enddo
 
-          !$acc parallel loop
+          !$acc loop
           do col = 1, ncol
           ! Compute the elapsed time
             time_counter(col) = time_counter(col) + mask(col) * dt0(col)
@@ -327,7 +325,7 @@ CONTAINS
           end do ! column loop
 
           ! Recalculate liquid water terminal velocity (m/s)
-          !$acc parallel loop collapse(2)
+          !$acc loop collapse(2)
           do col = 1, ncol
              do klev = lyr_surf, lyr_toa, lyr_step
                 velqr(col,klev)  = 36.34_kind_phys * rhalf(col,klev) * (qr(col, klev)*r(col,klev))**0.1364_kind_phys
@@ -335,28 +333,34 @@ CONTAINS
           end do ! column loop
 
           ! recompute the time step
-          !$acc parallel loop
+          !$acc loop private(dtmin)
           do col = 1, ncol
+             dtmin = dt0(col)
+             !$acc loop reduction(min:dtmin)
              do klev = lyr_surf, lyr_toa - lyr_step, lyr_step
                 if (abs(velqr(col,klev)) > 1.0E-12_kind_phys) then
-                   dt0(col) = min(dt0(col), 0.8_kind_phys*(z(col, klev+lyr_step) - z(col, klev)) / velqr(col,klev))
+                   dtmin = min(dtmin, 0.8_kind_phys*(z(col, klev+lyr_step) - z(col, klev)) / velqr(col,klev))
                 end if
              end do
+             dt0(col) = dtmin
           end do ! column loop
+          !$acc end parallel
 
           ! check to see if all columns have satisfied the condition
           all_converged = all_equal(mask,0._kind_phys)
 
       end do  ! do while loop
 
-      !$acc parallel loop
+      !$acc parallel
+
+      !$acc loop
       do col=1,ncol
          ! compute the average preciptation rate over the physics time step period
          precl(col) = precl_acc(col) / dt
       end do ! column loop
 
       ! Diagnostic: relative humidity (relhum)
-      !$acc parallel loop collapse(2)
+      !$acc loop collapse(2)
       do col = 1,ncol
          do klev = lyr_surf,lyr_toa,lyr_step
             ! Saturation vapor mixing ratio (gm/gm)
@@ -365,6 +369,8 @@ CONTAINS
             relhum(col,klev) = qv(col,klev) / qvs * 100._kind_phys ! in percent
           enddo
       end do ! column loop
+      !$acc end parallel
+
       !$acc end data
 
    end subroutine kessler_run
