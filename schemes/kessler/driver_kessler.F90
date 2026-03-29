@@ -171,7 +171,6 @@ program test_kessler_driver
                    precl, relhum, scheme_name, errmsg, errflg)
 
 #ifdef USE_GPU
-!#if 0
   ! Device -> host  memcpy
   !$omp target update from(theta(1:ncol,1:nz),qv(1:ncol,1:nz), &
   !$omp      qc(1:ncol,1:nz),qr(1:ncol,1:nz),precl(1:ncol),relhum(1:ncol,1:nz))

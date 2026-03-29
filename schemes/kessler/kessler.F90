@@ -174,8 +174,7 @@ CONTAINS
 
       ! Loop through columns
 
-      !!$acc data copyin(cpair,rair,rho,pk,velqr,z) copyout(time_counter,precl_acc,mask,r,pc,velqr,f5) copy(dt0,rhalf,qr)
-      !$acc parallel loop collapse(2) private(xk)
+      !$acc parallel loop collapse(2)
       do col =1,ncol
          do klev=lyr_surf, lyr_toa, lyr_step
 
@@ -241,8 +240,6 @@ CONTAINS
          ! initialize time-weighted accumulated precipitation
          precl_acc(col) = 0.0_kind_phys
       enddo
-      !!$acc end data
-      !!$acc data copyin(rho,pc,pk,f5,cpair,rhalf,r,z) copyout(precl) copy(precl_acc,sed,qc,qr,qv,theta,velqr,time_counter,mask,dt0)
       all_converged = .FALSE.
       ! Subcycle through the Kessler moisture processes,
       ! time loop ends when the physics time step is reached (within a margin of 1e-5 s)
@@ -260,7 +257,7 @@ CONTAINS
          enddo
 
          ! Mass-weighted sedimentation term using upstream differencing
-         !$acc parallel loop 
+         !$acc parallel loop
          do col = 1, ncol
             do klev = lyr_surf, lyr_toa - lyr_step, lyr_step
                sed(col,klev) = dt0(col) *                                                           &
@@ -269,7 +266,6 @@ CONTAINS
                     (r(col,klev) * (z(col, klev+lyr_step) - z(col, klev)))
             end do
          enddo
-
 
          !$acc parallel loop
          do col = 1, ncol
@@ -339,7 +335,7 @@ CONTAINS
           end do ! column loop
 
           ! recompute the time step
-          !$acc parallel loop 
+          !$acc parallel loop
           do col = 1, ncol
              do klev = lyr_surf, lyr_toa - lyr_step, lyr_step
                 if (abs(velqr(col,klev)) > 1.0E-12_kind_phys) then
@@ -352,9 +348,7 @@ CONTAINS
           all_converged = all_equal(mask,0._kind_phys)
 
       end do  ! do while loop
-      !!$acc end data
 
-      !!$acc data copyin(pc,pk,qv,theta,precl_acc) copyout(relhum,precl)
       !$acc parallel loop
       do col=1,ncol
          ! compute the average preciptation rate over the physics time step period
