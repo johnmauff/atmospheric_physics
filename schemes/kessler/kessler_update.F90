@@ -40,12 +40,21 @@ CONTAINS
       character(len=512), intent(out) :: errmsg
       integer,            intent(out) :: errflg
 
+      integer :: i, k
+      integer :: n1, n2
       errmsg = ''
       errflg = 0
 
       !   Initialize the previous temperature and its tendency to zero
-      temp_prev(:,:)  = temp(:,:)
-      ttend_t(:,:)    = 0._kind_phys
+      n1 = size(temp,dim=1)
+      n2 = size(temp,dim=2)
+      !$acc parallel loop collapse(2)
+      do k=1,n2
+        do i=1,n1
+          temp_prev(i,k)  = temp(i,k)
+          ttend_t(i,k)    = 0._kind_phys
+        enddo
+      enddo
 
    end subroutine kessler_update_timestep_init
 
@@ -68,16 +77,20 @@ CONTAINS
       integer,            intent(out)   :: errflg
 
       !Local variables
-      integer                           :: klev
-      real(kind_phys)                   :: new_temp(ncol)
+      integer                           :: klev, i
+
+
 
       errmsg = ''
       errflg = 0
 
       ! Back out tendencies from updated fields
+      !$acc parallel loop collapse(2)
       do klev = 1, nz
-         new_temp(:ncol) = theta(:ncol,klev) * exner(:ncol,klev)
-         ttend_t(:ncol,klev) = ttend_t(:ncol,klev) + ((new_temp(:ncol) - temp_prev(:ncol,klev)) / dt)
+         do i=1,ncol
+           ttend_t(i,klev) = ttend_t(i,klev) &
+               + ((theta(i,klev) * exner(i,klev) - temp_prev(i,klev)) / dt)
+         enddo
       end do
 
    end subroutine kessler_update_run
@@ -99,14 +112,18 @@ CONTAINS
       integer,            intent(out)   :: errflg
 
       ! Local variable
-      integer :: klev
+      integer :: klev, i, n1
 
       errmsg = ''
       errflg = 0
 
+      n1 = SIZE(cpair,dim=1)
+      !$acc parallel loop collapse(2)
       do klev = 1, nz
-         st_energy(:,klev) = (temp(:,klev) * cpair(:,klev)) + (gravit * zm(:,klev)) + &
-              phis(:)
+         do i=1,n1
+            st_energy(i,klev) = (temp(i,klev) * cpair(i,klev)) + (gravit * zm(i,klev)) + &
+              phis(i)
+         enddo
       end do
 
    end subroutine kessler_update_timestep_final

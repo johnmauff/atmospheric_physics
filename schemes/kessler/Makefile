@@ -44,9 +44,9 @@ compare:
 	./test_kessler >& test.$(COMPILER).log
 	diff test.$(COMPILER).log golden-nofma.$(COMPILER).log
 
-$(TARGET): ccpp_kinds.o kessler.o driver_kessler.o
+$(TARGET): ccpp_kinds.o kessler.o kessler_update.o driver_kessler.o
 	$(FC) $(FFLAGS) -o $(TARGET) \
-	    ccpp_kinds.o kessler.o driver_kessler.o
+	    ccpp_kinds.o kessler.o kessler_update.o driver_kessler.o
 
 # Compile in strict dependency order
 
@@ -56,11 +56,13 @@ ccpp_kinds.o: ccpp_kinds.F90
 kessler.o: kessler.F90 ccpp_kinds.o
 	$(FC) $(FFLAGS) -c kessler.F90
 
+kessler_update.o: kessler_update.F90 ccpp_kinds.o
+	$(FC) $(FFLAGS) -c kessler_update.F90
+
 driver_kessler.o: driver_kessler.F90 kessler.o
 	$(FC) $(FFLAGS) -c driver_kessler.F90
 
 # ------------------------------------------------------------
-# تنظيف
 # ------------------------------------------------------------
 
 clean:
