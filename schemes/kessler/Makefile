@@ -17,9 +17,9 @@ endif
 
 ifeq ($(COMPILER),nvhpc)
   FC = nvfortran
-  #FFLAGS = -O3 -Mpreprocess -acc=host -Mnofma
+  # FFLAGS = -O3 -Mpreprocess -acc=host -Mnofma
   # FFLAGS = -O3 -Mpreprocess -acc -mp=gpu -gpu=mem:separate,math_uniform -DUSE_GPU
-  FFLAGS = -O3 -Mpreprocess -acc -mp=gpu -gpu=mem:separate,math_uniform,nofma -Minfo=acc -DUSE_GPU
+   FFLAGS = -O3 -Mpreprocess -acc -mp=gpu -gpu=mem:separate,math_uniform,nofma -Minfo=acc -DUSE_GPU
 endif
 
 # ------------------------------------------------------------
