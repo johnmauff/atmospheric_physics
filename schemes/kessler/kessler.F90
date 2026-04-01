@@ -143,6 +143,7 @@ CONTAINS
       integer         :: col, klev                 ! Column and level indices
       integer         :: lyr_step                  ! Increment to move up a level
       integer         :: colError
+      integer         :: iterCnt
       logical         :: all_converged
       real(kind_phys) :: dtmin
 
@@ -171,6 +172,7 @@ CONTAINS
       !------------------------------------------------
       !   Begin calculation
       !------------------------------------------------
+      !!$acc parallel deviceptr(cpair,rair,pk,rho,qr,z)
       !$acc parallel
 
       ! Loop through columns
@@ -237,12 +239,14 @@ CONTAINS
          return
        endif
 
+      iterCnt = 0
       all_converged = .FALSE.
       ! Subcycle through the Kessler moisture processes,
       ! time loop ends when the physics time step is reached (within a margin of 1e-5 s)
       ! do while ( abs(dt - time_counter(col)) > 1.0E-5_kind_phys)
       do while ( .not. all_converged)
 
+         !!$acc parallel deviceptr(qr,qc,qv,pk,z,theta,rho,precl,cpair)
          !$acc parallel
          !$acc loop
          do col = 1, ncol
@@ -348,9 +352,11 @@ CONTAINS
 
           ! check to see if all columns have satisfied the condition
           all_converged = all_equal(mask,0._kind_phys)
+          iterCnt=iterCnt+1
 
       end do  ! do while loop
 
+      !!$acc parallel deviceptr(pk,theta,relhum,qv,precl)
       !$acc parallel
 
       !$acc loop
@@ -372,6 +378,7 @@ CONTAINS
       !$acc end parallel
 
       !$acc end data
+      print *,'iteration Cnt: ',iterCnt
 
    end subroutine kessler_run
 
