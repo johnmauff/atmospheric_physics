@@ -1,7 +1,10 @@
+!#define DEVICEPTR(...) deviceptr(__VA_ARGS__)
+#define DEVICEPTR(...)
 module kessler
 
    use ccpp_kinds, only:  kind_phys
-
+   use openacc
+   
    implicit none
    private
    save
@@ -99,20 +102,20 @@ CONTAINS
       real(kind_phys),  intent(in)    :: dt         ! Physics time step (s)
       integer,          intent(in)    :: lyr_surf   ! Index of surface layer in the vertical coordinate
       integer,          intent(in)    :: lyr_toa    ! Index of top of the atmosphere in the vertical coordinate
-      real(kind_phys),  intent(in)    :: cpair(:,:) ! Specific_heat_of_dry_air_at_constant_pressure (J/kg/K)
-      real(kind_phys),  intent(in)    :: rair(:,:)  ! Gas constant of dry air (J/kg/K)
-      real(kind_phys),  intent(in)    :: rho(:,:)   ! Dry air density (kg/m^3)
-      real(kind_phys),  intent(in)    :: z(:,:)     ! Heights of thermo. levels (m)
-      real(kind_phys),  intent(in)    :: pk(:,:)    ! Exner function (p/p0)**(R/cp)
+      real(kind_phys),  intent(in)    :: cpair(ncol,nz) ! Specific_heat_of_dry_air_at_constant_pressure (J/kg/K)
+      real(kind_phys),  intent(in)    :: rair(ncol,nz)  ! Gas constant of dry air (J/kg/K)
+      real(kind_phys),  intent(in)    :: rho(ncol,nz)   ! Dry air density (kg/m^3)
+      real(kind_phys),  intent(in)    :: z(ncol,nz)     ! Heights of thermo. levels (m)
+      real(kind_phys),  intent(in)    :: pk(ncol,nz)    ! Exner function (p/p0)**(R/cp)
 
-      real(kind_phys),  intent(inout) :: theta(:,:) ! Potential temperature (K)
-      real(kind_phys),  intent(inout) :: qv(:,:)    ! Water vapor mixing ratio wrt dry air (kg/kg)
-      real(kind_phys),  intent(inout) :: qc(:,:)    ! Cloud water mixing ratio wrt dry air (kg/kg)
-      real(kind_phys),  intent(inout) :: qr(:,:)    ! Rain water mixing ratio wrt dry air (kg/kg)
+      real(kind_phys),  intent(inout) :: theta(ncol,nz) ! Potential temperature (K)
+      real(kind_phys),  intent(inout) :: qv(ncol,nz)    ! Water vapor mixing ratio wrt dry air (kg/kg)
+      real(kind_phys),  intent(inout) :: qc(ncol,nz)    ! Cloud water mixing ratio wrt dry air (kg/kg)
+      real(kind_phys),  intent(inout) :: qr(ncol,nz)    ! Rain water mixing ratio wrt dry air (kg/kg)
 
-      real(kind_phys),  intent(out)   :: precl(:)   ! Precipitation rate (m_water / s)
+      real(kind_phys),  intent(out)   :: precl(ncol)   ! Precipitation rate (m_water / s)
 
-      real(kind_phys),  intent(out)   :: relhum(:,:)! Relative humidity in percent
+      real(kind_phys),  intent(out)   :: relhum(ncol,nz)! Relative humidity in percent
 
       character(len=64),intent(out)   :: scheme_name
       character(len=*), intent(out)   :: errmsg
@@ -148,7 +151,7 @@ CONTAINS
       real(kind_phys) :: dtmin
 
       ! Initialize output variables
-      precl = 0._kind_phys
+      ! precl = 0._kind_phys
       errmsg = ''
       errflg = 0
       scheme_name = "KESSLER"
@@ -168,15 +171,13 @@ CONTAINS
 
       f2x = 17.27_kind_phys  ! constant for the saturation mixing ratio
 
-      !$acc data create(r,rhalf,velqr,sed,pc,f5,dt0,mask,time_counter,precl_acc)
+      !$acc enter data create(r,rhalf,velqr,sed,pc,f5,dt0,mask,time_counter,precl_acc)
+
       !------------------------------------------------
       !   Begin calculation
       !------------------------------------------------
-      !!$acc parallel deviceptr(cpair,rair,pk,rho,qr,z)
-      !$acc parallel
-
-      ! Loop through columns
-      !$acc loop collapse(2)
+      !$acc parallel loop collapse(2) gang vector DEVICEPTR(cpair,rair,pk,rho,qr) &
+      !$acc present(f5,r,rhalf,pc,velqr) default(present)
       do col =1,ncol
          do klev=lyr_surf, lyr_toa, lyr_step
 
@@ -201,12 +202,13 @@ CONTAINS
       enddo
 
       ! Compute maximum time step size in accordance with CFL condition
-      !$acc loop private(dtmin)
+      !$acc parallel loop gang DEVICEPTR(z,precl) &
+      !$acc present(velqr,dt0,mask,time_counter,precl_acc) private(dtmin) default(present)
       do col=1,ncol
          dt0(col)  = dt
-         mask(col) = 1.0
+         mask(col) = 1.0_kind_phys
          dtmin = dt0(col)
-         !$acc loop reduction(min:dtmin)
+         !$acc loop vector reduction(min:dtmin)
          do  klev=lyr_surf,lyr_toa - lyr_step,lyr_step
            ! NB: Original test for velqr /= 0 numerically unstable
            if (abs(velqr(col,klev)) > 1.0E-12_kind_phys) then
@@ -220,9 +222,10 @@ CONTAINS
 
          ! initialize time-weighted accumulated precipitation
          precl_acc(col) = 0.0_kind_phys
+         precl(col) = 0.0_kind_phys
       enddo
 
-      !$acc loop
+      !$acc parallel loop gang vector present(dt0) default(present)
       do col = 1, ncol
          ! Check the time step dt0
          if (dt0(col) <  1.0E-12_kind_phys) then
@@ -232,7 +235,6 @@ CONTAINS
             errflg = 1
          end if
       enddo
-      !$acc end parallel
 
       if(errflg .eq. 1) then 
          write(errmsg, *) 'KESSLER: bad time splitting ',dt,dt0(colError)
@@ -246,9 +248,8 @@ CONTAINS
       ! do while ( abs(dt - time_counter(col)) > 1.0E-5_kind_phys)
       do while ( .not. all_converged)
 
-         !!$acc parallel deviceptr(qr,qc,qv,pk,z,theta,rho,precl,cpair)
-         !$acc parallel
-         !$acc loop
+         !$acc parallel loop gang vector DEVICEPTR(rho,qr,precl) &
+         !$acc present(velqr,precl_acc,dt0,mask) default(present)
          do col = 1, ncol
             ! Precipitation rate (m_water/s) over the subcycled time step
             precl(col) = rho(col, lyr_surf) * qr(col, lyr_surf) * velqr(col,lyr_surf) / rhoqr
@@ -259,7 +260,8 @@ CONTAINS
          enddo
 
          ! Mass-weighted sedimentation term using upstream differencing
-         !$acc loop
+         !$acc parallel loop collapse(2) gang vector DEVICEPTR(qr,z) &
+         !$acc present(sed,r,velqr,dt0) default(present)
          do col = 1, ncol
             do klev = lyr_surf, lyr_toa - lyr_step, lyr_step
                sed(col,klev) = dt0(col) *                                                           &
@@ -269,13 +271,15 @@ CONTAINS
             end do
          enddo
 
-         !$acc loop
+         !$acc parallel loop gang vector DEVICEPTR(qr,z) &
+         !$acc present(sed,velqr,dt0) default(present)
          do col = 1, ncol
             sed(col,lyr_toa) = -dt0(col) * qr(col, lyr_toa) * velqr(col,lyr_toa) /    &
                  (0.5_kind_phys * (z(col, lyr_toa)-z(col, lyr_toa-lyr_step)))
          enddo
 
-         !$acc loop collapse(2)
+         !$acc parallel loop collapse(2) gang vector DEVICEPTR(qc,qr,qv,pk,theta,cpair) &
+         !$acc present(sed,r,pc,f5,dt0,mask) default(present)
          do col = 1, ncol
             ! Adjustment terms
             do klev = lyr_surf, lyr_toa, lyr_step
@@ -313,7 +317,7 @@ CONTAINS
             end do
           enddo
 
-          !$acc loop
+          !$acc parallel loop gang vector present(time_counter,mask,dt0) default(present)
           do col = 1, ncol
           ! Compute the elapsed time
             time_counter(col) = time_counter(col) + mask(col) * dt0(col)
@@ -321,7 +325,7 @@ CONTAINS
             ! Construct a mask that if a columns have satisfied an exit condition
             !    has not converged = 1.0
             !    has converged = 0.0
-             if (abs(dt - time_counter(col)) > 1.0E-5_kind_phys) then 
+             if (abs(dt - time_counter(col)) > 1.0E-5_kind_phys) then
                 mask(col) = 1._kind_phys
              else
                 mask(col) = 0._kind_phys
@@ -329,7 +333,8 @@ CONTAINS
           end do ! column loop
 
           ! Recalculate liquid water terminal velocity (m/s)
-          !$acc loop collapse(2)
+          !$acc parallel loop collapse(2) gang vector DEVICEPTR(qr) &
+          !$acc present(velqr,rhalf,r) default(present)
           do col = 1, ncol
              do klev = lyr_surf, lyr_toa, lyr_step
                 velqr(col,klev)  = 36.34_kind_phys * rhalf(col,klev) * (qr(col, klev)*r(col,klev))**0.1364_kind_phys
@@ -337,10 +342,11 @@ CONTAINS
           end do ! column loop
 
           ! recompute the time step
-          !$acc loop private(dtmin)
+          !$acc parallel loop gang DEVICEPTR(z) &
+          !$acc present(velqr,dt0) private(dtmin) default(present)
           do col = 1, ncol
              dtmin = dt0(col)
-             !$acc loop reduction(min:dtmin)
+             !$acc loop vector reduction(min:dtmin)
              do klev = lyr_surf, lyr_toa - lyr_step, lyr_step
                 if (abs(velqr(col,klev)) > 1.0E-12_kind_phys) then
                    dtmin = min(dtmin, 0.8_kind_phys*(z(col, klev+lyr_step) - z(col, klev)) / velqr(col,klev))
@@ -348,25 +354,22 @@ CONTAINS
              end do
              dt0(col) = dtmin
           end do ! column loop
-          !$acc end parallel
 
           ! check to see if all columns have satisfied the condition
-          all_converged = all_equal(mask,0._kind_phys)
+          all_converged = all_equal(ncol, mask, 0._kind_phys)
           iterCnt=iterCnt+1
 
       end do  ! do while loop
 
-      !!$acc parallel deviceptr(pk,theta,relhum,qv,precl)
-      !$acc parallel
-
-      !$acc loop
+      !$acc parallel loop gang vector DEVICEPTR(precl) present(precl_acc) default(present)
       do col=1,ncol
          ! compute the average preciptation rate over the physics time step period
          precl(col) = precl_acc(col) / dt
       end do ! column loop
 
       ! Diagnostic: relative humidity (relhum)
-      !$acc loop collapse(2)
+      !$acc parallel loop collapse(2) gang vector DEVICEPTR(pk,theta,relhum,qv) &
+      !$acc present(pc) default(present)
       do col = 1,ncol
          do klev = lyr_surf,lyr_toa,lyr_step
             ! Saturation vapor mixing ratio (gm/gm)
@@ -375,29 +378,28 @@ CONTAINS
             relhum(col,klev) = qv(col,klev) / qvs * 100._kind_phys ! in percent
           enddo
       end do ! column loop
-      !$acc end parallel
 
-      !$acc end data
-      print *,'iteration Cnt: ',iterCnt
+      !$acc exit data delete(r,rhalf,velqr,sed,pc,f5,dt0,mask,time_counter,precl_acc)
+
+      !print *,'iteration Cnt: ',iterCnt
 
    end subroutine kessler_run
 
    !=======================================================================
-   logical function all_equal(data,val) 
+   logical function all_equal(n, data,val) 
 
       implicit none
-      real(kind_phys), intent(in) :: data(:)
+      integer, intent(in) :: n
+      real(kind_phys), intent(in) :: data(n)
       real(kind_phys), intent(in) :: val
 
       ! local variables
-      integer :: i, n
+      integer :: i
       logical :: result
 
       result = .true.
 
-      n = size(data)
-
-      !$acc parallel loop reduction(.and.:result)
+      !$acc parallel loop gang vector present(data) reduction(.and.:result)
       do i= 1, n
          if(data(i) .ne. val) then 
              result = .false.

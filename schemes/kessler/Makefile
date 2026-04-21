@@ -59,7 +59,7 @@ kessler.o: kessler.F90 ccpp_kinds.o
 kessler_update.o: kessler_update.F90 ccpp_kinds.o
 	$(FC) $(FFLAGS) -c kessler_update.F90
 
-driver_kessler.o: driver_kessler.F90 kessler.o
+driver_kessler.o: driver_kessler.F90 kessler.o kessler_update.o
 	$(FC) $(FFLAGS) -c driver_kessler.F90
 
 # ------------------------------------------------------------

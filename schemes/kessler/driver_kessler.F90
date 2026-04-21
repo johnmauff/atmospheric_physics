@@ -214,7 +214,7 @@ program test_kessler_driver
   !$omp target update to(temp(1:ncol,1:nz))
 #endif
   
-  call kessler_update_timestep_init(temp, temp_prev, ttend_t, errmsg, errflg)
+  call kessler_update_timestep_init(ncol, nz, temp, temp_prev, ttend_t, errmsg, errflg)
 
 #ifdef USE_GPU
   !$omp target update from(temp_prev(1:ncol,1:nz),ttend_t(1:ncol,1:nz))
@@ -243,8 +243,8 @@ program test_kessler_driver
   !$omp      zm(1:ncol,1:nz),phis(1:ncol))
 #endif
 
-   call kessler_update_timestep_final(nz, cpair, temp, zm, phis, &
-              st_energy, errflg, errmsg)
+   call kessler_update_timestep_final(nz, ncol, cpair, temp, zm, phis, &
+              st_energy, errmsg, errflg)
 
 #ifdef USE_GPU
    !$omp target update from(st_energy(1:ncol,1:nz))
