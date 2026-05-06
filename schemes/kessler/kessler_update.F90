@@ -48,7 +48,8 @@ CONTAINS
       errflg = 0
 
       !   Initialize the previous temperature and its tendency to zero
-      !$acc parallel loop collapse(2) DEVICEPTR(temp, temp_prev, ttend_t)
+      !!$acc parallel loop collapse(2) DEVICEPTR(temp, temp_prev, ttend_t)
+      !$acc parallel loop collapse(2)
       do k=1,nz
         do i=1,ncol
           temp_prev(i,k)  = temp(i,k)

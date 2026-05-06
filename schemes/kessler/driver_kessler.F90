@@ -33,6 +33,8 @@ program test_kessler_driver
   integer, allocatable :: seed_values(:)
   integer :: seed_size
 
+  real(8) :: t1, t2, etime
+
   logical :: use_host
   integer :: dev
   integer(c_size_t) :: bytes1D, bytes2D
@@ -43,12 +45,13 @@ program test_kessler_driver
                  st_energy_raw, ttend_t_raw
 
   integer :: i, k, ierr
+  integer :: version
 
   !------------------------------------------------------
   ! Set grid size
   !------------------------------------------------------
   !ncol = 2
-  ncol = 128
+  ncol = 1000
   nz   = 56
   dt   = 60.0_kind_phys
 
@@ -192,13 +195,26 @@ program test_kessler_driver
 
 #endif
 
+  version = 2
+
+  t1 = omp_get_wtime()
   !------------------------------------------------------
   ! Run microphysics
   !------------------------------------------------------
-  call kessler_run(ncol, nz, dt, lyr_surf, lyr_toa, &
-                   cpair, rair, rho, z, pk, &
-                   theta, qv, qc, qr, &
-                   precl, relhum, scheme_name, errmsg, errflg)
+  if(version .eq. 1) then 
+     call kessler_runv1(ncol, nz, dt, lyr_surf, lyr_toa, &
+                          cpair, rair, rho, z, pk, &
+                          theta, qv, qc, qr, &
+                          precl, relhum, scheme_name, errmsg, errflg)
+  elseif (version .eq. 2) then 
+     call kessler_runv2(ncol, nz, dt, lyr_surf, lyr_toa, &
+                          cpair, rair, rho, z, pk, &
+                          theta, qv, qc, qr, &
+                          precl, relhum, scheme_name, errmsg, errflg)
+  endif
+  t2 = omp_get_wtime()
+ 
+  etime = t2 - t1
 
 #ifdef USE_GPU
   ! Device -> host  memcpy
@@ -264,6 +280,7 @@ program test_kessler_driver
      print *, 'temp_prev: ', SUM(temp_prev)
      print *, 'ttend_t: ', SUM(ttend_t)
      print *, 'st_energy: ', SUM(st_energy)
+     print *, 'Elapsed time: (ms) ',etime/1.e-3
   end if
 
 end program test_kessler_driver
