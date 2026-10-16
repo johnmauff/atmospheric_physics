@@ -35,7 +35,7 @@ contains
 
 !> \section arg_table_initialize_pbuf_aerosols_register  Argument Table
 !! \htmlinclude initialize_pbuf_aerosols_register.html
-  subroutine initialize_pbuf_aerosols_register(constituents, errmsg, errflg)
+  subroutine initialize_pbuf_aerosols_register(pbuf_aerosol_constituents, errmsg, errflg)
     use ccpp_constituent_prop_mod, only: ccpp_constituent_properties_t
     use cam_initfiles,             only: initial_file_get_id
     use pio,                       only: file_desc_t, var_desc_t, &
@@ -45,7 +45,7 @@ contains
     use ccpp_chem_utils,           only: chem_constituent_qmin
 
     ! Dummy variables
-    type(ccpp_constituent_properties_t), allocatable, intent(out) :: constituents(:)
+    type(ccpp_constituent_properties_t), allocatable, intent(out) :: pbuf_aerosol_constituents(:)
     character(len=*),   intent(out) :: errmsg
     integer,            intent(out) :: errflg
 
@@ -108,9 +108,9 @@ contains
     end if
 
     ! Register constituents
-    allocate(constituents(nspecies), stat=errflg, errmsg=errmsg)
+    allocate(pbuf_aerosol_constituents(nspecies), stat=errflg, errmsg=errmsg)
     if (errflg /= 0) then
-      errmsg = subname // ': Failed to allocate constituents: ' // trim(errmsg)
+      errmsg = subname // ': Failed to allocate pbuf_aerosol_constituents: ' // trim(errmsg)
       return
     end if
 
@@ -121,7 +121,7 @@ contains
         unit_name = 'kg kg-1'
       end if
 
-      call constituents(i)%instantiate( &
+      call pbuf_aerosol_constituents(i)%instantiate( &
         std_name          = trim(species_list(i)), &
         diag_name         = trim(species_list(i)), &
         long_name         = 'prescribed aerosol ' // trim(species_list(i)), &

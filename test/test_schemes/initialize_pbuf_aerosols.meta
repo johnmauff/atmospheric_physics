@@ -4,7 +4,7 @@
 [ccpp-arg-table]
   name = initialize_pbuf_aerosols_register
   type = scheme
-[ constituents ]
+[ pbuf_aerosol_constituents ]
   standard_name = dynamic_constituents_for_initialize_pbuf_aerosols
   units = none
   dimensions = (:)
