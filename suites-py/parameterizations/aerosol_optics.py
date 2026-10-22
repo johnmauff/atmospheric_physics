@@ -7,6 +7,7 @@ from categories.interface import Parameterization
 aerosol_optics_scheme      = ccpp_scheme_ref("aerosol_optics")
 aerosol_optics_diagnostics = ccpp_scheme_ref("aerosol_optics_diagnostics")
 compute_relative_humidity  = ccpp_scheme_ref("compute_relative_humidity")
+aerosol_optics_zero_stub   = ccpp_scheme_ref("aerosol_optics_zero_stub")
 
 
 @ccpp_composite
@@ -28,6 +29,9 @@ def bulk_aerosol_optical_properties_with_humidity():
 
 bulk_aerosol_optics = Parameterization(name="bulk aerosol optics",
                                        run=bulk_aerosol_optical_properties)
+# No aerosols: zero aerosol optical properties (RRTMGP test suite).
+zero_aerosol_optics = Parameterization(name="no aerosols (zero optics)",
+                                       run=aerosol_optics_zero_stub)
 bulk_aerosol_optics_with_humidity = Parameterization(
     name="bulk aerosol optics, with relative humidity",
     run=bulk_aerosol_optical_properties_with_humidity)

@@ -7,6 +7,11 @@ shortwave and longwave run (``rrtmgp_pre``), where CAM's aerosol optics run,
 which CAM schemes fill the package's hooks, and what happens after
 radiation (heating carried between radiation steps, net heating, coupler
 output, freeing RRTMGP's objects, the state update).
+
+Two forms, differing only in where the aerosol optics role runs:
+``rrtmgp`` -- right after rrtmgp_pre, before the package (CAM4, CAM7);
+``rrtmgp_shortwave_aerosols`` -- through the package's shortwave
+``aerosol_optics`` hook, after the cloud optics (the RRTMGP test suite).
 """
 
 from xdsl_ccpp.frontend.py_api import ccpp_composite, ccpp_scheme_ref
@@ -35,18 +40,15 @@ rrtmgp_subcycle          = ccpp_scheme_ref("rrtmgp_subcycle")
 NDIAG = "number_of_diagnostic_subcycles"
 
 
-@ccpp_composite
-def cam_rrtmgp(*, aerosol_optics=nothing):
-    """aerosol_optics runs right after rrtmgp_pre, which provides the night
-    columns its diagnostics need."""
+def _cam_rrtmgp(before_package, in_shortwave):
     rrtmgp_pre()                                  # when SW/LW run this step
-    aerosol_optics()
+    before_package()
     rrtmgp_prepare(tropopause=tropopause_find)
     rrtmgp_shortwave(n_calls=NDIAG,
                      next_call=rrtmgp_subcycle,
                      gas_source=rrtmgp_constituents,
                      solar_source=solar_irradiance_data,
-                     aerosol_optics=nothing,      # CAM's run before the package
+                     aerosol_optics=in_shortwave,
                      cloud_diagnostics=rrtmgp_cloud_diagnostics,
                      diagnostics=rrtmgp_sw_diagnostics)
     rrtmgp_longwave(n_calls=NDIAG,
@@ -60,4 +62,19 @@ def cam_rrtmgp(*, aerosol_optics=nothing):
     update_temperature()
 
 
+@ccpp_composite
+def cam_rrtmgp(*, aerosol_optics=nothing):
+    """aerosol_optics runs right after rrtmgp_pre, which provides the night
+    columns its diagnostics need."""
+    _cam_rrtmgp(before_package=aerosol_optics, in_shortwave=nothing)
+
+
+@ccpp_composite
+def cam_rrtmgp_shortwave_aerosols(*, aerosol_optics=nothing):
+    """aerosol_optics runs in the package's shortwave aerosol_optics hook."""
+    _cam_rrtmgp(before_package=nothing, in_shortwave=aerosol_optics)
+
+
 rrtmgp = Parameterization(name="RRTMGP", run=cam_rrtmgp)
+rrtmgp_shortwave_aerosols = Parameterization(
+    name="RRTMGP, aerosol optics in the shortwave", run=cam_rrtmgp_shortwave_aerosols)
