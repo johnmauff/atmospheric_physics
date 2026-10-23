@@ -1,51 +1,48 @@
-"""Kessler warm-rain microphysics (moist idealized physics).
+"""Kessler warm-rain microphysics (moist idealized physics) as CAM runs it:
+CAM's adapter around the Kessler package (kessler_package.py).
 
-Kessler works in potential temperature and dry mixing ratios; CAM's state
-is temperature and wet mixing ratios.  The parameterization therefore
-converts on the way in and out around the Kessler scheme itself.
+Kessler works in dry mixing ratios; CAM's are wet. The adapter fills the
+package's conversion hooks with CAM's schemes for the three water species,
+then cleans up negative mixing ratios and recomputes the geopotential.
 """
 
 from xdsl_ccpp.frontend.py_api import ccpp_composite, ccpp_scheme_ref
 
 from categories.interface import Parameterization
 from categories.state import geopotential_temp, qneg
+from parameterizations.kessler_package import kessler_microphysics
 
-calc_exner                     = ccpp_scheme_ref("calc_exner")
-temp_to_potential_temp         = ccpp_scheme_ref("temp_to_potential_temp")
-calc_dry_air_ideal_gas_density = ccpp_scheme_ref("calc_dry_air_ideal_gas_density")
 wet_to_dry_water_vapor         = ccpp_scheme_ref("wet_to_dry_water_vapor")
 wet_to_dry_cloud_liquid_water  = ccpp_scheme_ref("wet_to_dry_cloud_liquid_water")
 wet_to_dry_rain                = ccpp_scheme_ref("wet_to_dry_rain")
-kessler_scheme                 = ccpp_scheme_ref("kessler")
-potential_temp_to_temp         = ccpp_scheme_ref("potential_temp_to_temp")
 dry_to_wet_water_vapor         = ccpp_scheme_ref("dry_to_wet_water_vapor")
 dry_to_wet_cloud_liquid_water  = ccpp_scheme_ref("dry_to_wet_cloud_liquid_water")
 dry_to_wet_rain                = ccpp_scheme_ref("dry_to_wet_rain")
-kessler_update                 = ccpp_scheme_ref("kessler_update")
 kessler_diagnostics            = ccpp_scheme_ref("kessler_diagnostics")
 
 
 @ccpp_composite
-def kessler_microphysics():
-    # In: temperature -> potential temperature, wet -> dry mixing ratios
-    calc_exner()
-    temp_to_potential_temp()
-    calc_dry_air_ideal_gas_density()
+def water_to_dry():
+    """Kessler's water species, wet to dry mixing ratios."""
     wet_to_dry_water_vapor()
     wet_to_dry_cloud_liquid_water()
     wet_to_dry_rain()
 
-    kessler_scheme()
 
-    # Out: back to temperature and wet mixing ratios, update the state
-    potential_temp_to_temp()
+@ccpp_composite
+def water_to_wet():
+    """Kessler's water species, dry to wet mixing ratios."""
     dry_to_wet_water_vapor()
     dry_to_wet_cloud_liquid_water()
     dry_to_wet_rain()
-    kessler_update()
+
+
+@ccpp_composite
+def cam_kessler():
+    kessler_microphysics(to_dry=water_to_dry, to_wet=water_to_wet)
     qneg()
     geopotential_temp()
 
 
-kessler = Parameterization(name="Kessler microphysics", run=kessler_microphysics,
+kessler = Parameterization(name="Kessler microphysics", run=cam_kessler,
                            diagnostics=kessler_diagnostics)

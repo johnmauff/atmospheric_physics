@@ -3,7 +3,7 @@
 Radiation only, for testing RRTMGP on its own: the test scheme
 initialize_constituents sets the constituents a standalone radiation test
 needs, then RRTMGP runs with zero aerosol optics.  Used by CAM-SIMA's
-composite RRTMGP tests (CCPP_SUITE_DIR=suites-py).
+composite RRTMGP tests (CCPP_SUITE_DIR=test/test_suites-py).
 """
 
 from xdsl_ccpp.frontend.py_api import ccpp_scheme_ref, ccpp_suite, export_suite
