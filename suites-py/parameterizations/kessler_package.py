@@ -19,7 +19,9 @@ kessler_scheme                 = ccpp_scheme_ref("kessler")
 potential_temp_to_temp         = ccpp_scheme_ref("potential_temp_to_temp")
 kessler_update                 = ccpp_scheme_ref("kessler_update")
 
-kessler = ccpp_package("kessler")
+# scheme_name: each scheme writes its own name for the energy checks, inside
+# the package (kessler) and out (qneg, check_energy_*).
+kessler = ccpp_package("kessler", shared_state=["scheme_name"])
 
 
 @kessler.entry_point
