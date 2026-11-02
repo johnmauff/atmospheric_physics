@@ -10,9 +10,7 @@ module kessler
    save
 
    public :: kessler_init   ! init routine
-   public :: kessler_runv1  ! main routine (original loop structure)
-   public :: kessler_runv2  ! main routine (modified loop structure)
-   public :: kessler_run    ! CCPP-standard entry point (calls kessler_runv2)
+   public :: kessler_run  ! CPP-standar entry point routine (modified loop structure)
 
    ! Private module data (constants set at initialization)
    real(kind_phys) :: lv    ! latent heat of vaporization, J/kg
@@ -93,301 +91,7 @@ CONTAINS
 
    !> \section arg_table_kessler_run  Argument Table
    !! \htmlinclude kessler_run.html
-   subroutine kessler_runv1(ncol, nz, dt, lyr_surf, lyr_toa, cpair, rair, rho, z, &
-        pk, theta, qv, qc, qr, precl, relhum, scheme_name, errmsg, errflg)
-
-      !------------------------------------------------
-      !   Input / output parameters
-      !------------------------------------------------
-      integer,          intent(in)    :: ncol       ! Number of columns
-      integer,          intent(in)    :: nz         ! Number of vertical levels
-      real(kind_phys),  intent(in)    :: dt         ! Physics time step (s)
-      integer,          intent(in)    :: lyr_surf   ! Index of surface layer in the vertical coordinate
-      integer,          intent(in)    :: lyr_toa    ! Index of top of the atmosphere in the vertical coordinate
-      real(kind_phys),  intent(in)    :: cpair(:,:) ! Specific_heat_of_dry_air_at_constant_pressure (J/kg/K)
-      real(kind_phys),  intent(in)    :: rair(:,:)  ! Gas constant of dry air (J/kg/K)
-      real(kind_phys),  intent(in)    :: rho(:,:)   ! Dry air density (kg/m^3)
-      real(kind_phys),  intent(in)    :: z(:,:)     ! Heights of thermo. levels (m)
-      real(kind_phys),  intent(in)    :: pk(:,:)    ! Exner function (p/p0)**(R/cp)
-
-      real(kind_phys),  intent(inout) :: theta(:,:) ! Potential temperature (K)
-      real(kind_phys),  intent(inout) :: qv(:,:)    ! Water vapor mixing ratio wrt dry air (kg/kg)
-      real(kind_phys),  intent(inout) :: qc(:,:)    ! Cloud water mixing ratio wrt dry air (kg/kg)
-      real(kind_phys),  intent(inout) :: qr(:,:)    ! Rain water mixing ratio wrt dry air (kg/kg)
-
-      real(kind_phys),  intent(out)   :: precl(:)   ! Precipitation rate (m_water / s)
-
-      real(kind_phys),  intent(out)   :: relhum(:,:)! Relative humidity in percent
-
-      character(len=64),intent(out)   :: scheme_name
-      character(len=*), intent(out)   :: errmsg
-      integer,          intent(out)   :: errflg
-
-      !------------------------------------------------
-      !   Local variables
-      !------------------------------------------------
-      real(kind_phys) :: r(ncol,nz),         &          ! Density in gm/(cm)^3
-                         rhalf(ncol,nz),     &          ! sqrt ( density (lowest_model_level) / density (model_level))
-                         velqr(ncol,nz),     &          ! Terminal fall speed of rain water (m/s)
-                         sed(ncol,nz),       &          ! Sedimentation rate
-                         pc(ncol,nz)                   ! Parameter: 3.8 hPa / pressure (in hPa)
-
-      real(kind_phys) :: f5(ncol,nz),   &          ! Parameter for the computation of the condensation rate
-                         f2x,           &          ! Parameter for the computation of the saturation mixing ratio
-                         xk,            &          ! 1/kappa = cp/R
-                         ern,           &          ! Evaporization rate of rain water
-                         qrprod,        &          ! qc & qr changes due to autoconversion and collection of cloud water by rain
-                         prod,          &          ! Used to compute condensation rate
-                         qvs,           &          ! Saturation mixing ratio (in gm/gm)
-                         dt0(ncol),     &          ! Subcycling time step (obeys 80% of the CFL constraint in the vertical)
-                         mask(ncol)                ! Mask out columns that have already converged
-
-      real(kind_phys) :: time_counter(ncol),  &    ! Elapsed time during the subcycling steps
-                         precl_acc(ncol)           ! Time-weighted accumulation of the precipitation rate
-
-      integer         :: col, klev                 ! Column and level indices
-      integer         :: lyr_step                  ! Increment to move up a level
-      integer         :: colError
-      integer         :: iterCnt
-      logical         :: all_converged
-      real(kind_phys) :: dtmin
-
-      ! Initialize output variables
-      ! precl = 0._kind_phys
-      errmsg = ''
-      errflg = 0
-      scheme_name = "KESSLER"
-
-      ! Check inputs
-      if (dt <= 0._kind_phys) then
-         write(errmsg,*) 'KESSLER called with nonpositive dt'
-         errflg = 1
-         return
-      end if
-
-      if (lyr_surf > lyr_toa) then
-         lyr_step = -1
-      else
-         lyr_step = 1
-      end if
-
-      f2x = 17.27_kind_phys  ! constant for the saturation mixing ratio
-
-      !$acc enter data create(r,rhalf,velqr,sed,pc,f5,dt0,mask,time_counter,precl_acc)
-
-      !------------------------------------------------
-      !   Begin calculation
-      !------------------------------------------------
-      !$acc parallel loop collapse(2) gang vector &
-      !$acc present(cpair,rair,pk,rho,qr,f5,r,rhalf,pc,velqr) default(present)
-      do col =1,ncol
-         do klev=lyr_surf, lyr_toa, lyr_step
-
-            !Calculate constants:
-            f5(col,klev)  = 4093._kind_phys * lv / cpair(col,klev) ! constant for the condensation rate
-            xk  = cpair(col,klev) / rair(col,klev)       ! 1/kappa = cp/R
-
-            r(col,klev)     = 0.001_kind_phys * rho(col, klev)
-            rhalf(col,klev) = sqrt(rho(col, lyr_surf) / rho(col, klev))
-            pc(col,klev)    = 3.8_kind_phys / ((pk(col, klev)**xk) * pref)
-            !
-            ! if qr is (round-off) negative then the computation of
-            ! velqr triggers floating point exception error when running
-            ! in debugging mode with NAG
-            !
-            qr(col,klev) = MAX(qr(col,klev),0.0_kind_phys)
-            !
-            ! Liquid water terminal velocity (m/s) following Klemp and Wilhelmson (1978), Eq. (2.15)
-            velqr(col,klev)  = 36.34_kind_phys * rhalf(col,klev) *          &
-                 (qr(col, klev) * r(col,klev))**0.1364_kind_phys
-        enddo
-      enddo
-
-      ! Compute maximum time step size in accordance with CFL condition
-      !$acc parallel loop gang &
-      !$acc present(z,precl,velqr,dt0,mask,time_counter,precl_acc) private(dtmin) default(present)
-      do col=1,ncol
-         dt0(col)  = dt
-         mask(col) = 1.0_kind_phys
-         dtmin = dt0(col)
-         !$acc loop vector reduction(min:dtmin)
-         do  klev=lyr_surf,lyr_toa - lyr_step,lyr_step
-           ! NB: Original test for velqr /= 0 numerically unstable
-           if (abs(velqr(col,klev)) > 1.0E-12_kind_phys) then
-              dtmin = min(dtmin, 0.8_kind_phys*(z(col, klev+lyr_step) - &
-                  z(col, klev)) / velqr(col,klev))
-           end if
-         enddo
-         dt0(col) = dtmin
-         ! time counter keeps track of the elapsed time during the subcycling process
-         time_counter(col) = 0.0_kind_phys
-
-         ! initialize time-weighted accumulated precipitation
-         precl_acc(col) = 0.0_kind_phys
-         precl(col) = 0.0_kind_phys
-      enddo
-
-      !$acc parallel loop gang vector present(dt0) default(present)
-      do col = 1, ncol
-         ! Check the time step dt0
-         if (dt0(col) <  1.0E-12_kind_phys) then
-            !$acc atomic write
-            colError = col
-            !$acc atomic write
-            errflg = 1
-         end if
-      enddo
-
-      if(errflg .eq. 1) then 
-         write(errmsg, *) 'KESSLER: bad time splitting ',dt,dt0(colError)
-         return
-       endif
-
-      iterCnt = 0
-      all_converged = .FALSE.
-      ! Subcycle through the Kessler moisture processes,
-      ! time loop ends when the physics time step is reached (within a margin of 1e-5 s)
-      ! do while ( abs(dt - time_counter(col)) > 1.0E-5_kind_phys)
-      do while ( .not. all_converged)
-
-         !$acc parallel loop gang vector &
-         !$acc present(rho,qr,precl,velqr,precl_acc,dt0,mask) default(present)
-         do col = 1, ncol
-            ! Precipitation rate (m_water/s) over the subcycled time step
-            precl(col) = rho(col, lyr_surf) * qr(col, lyr_surf) * velqr(col,lyr_surf) / rhoqr
-
-            ! accumulate the preciptation rate over the subcycled time steps
-            ! (weighted with the subcycled time step), unit is m_water
-            precl_acc(col) = precl_acc(col) + mask(col)*(precl(col) * dt0(col))
-         enddo
-
-         ! Mass-weighted sedimentation term using upstream differencing
-         !$acc parallel loop collapse(2) gang vector &
-         !$acc present(qr,z,sed,r,velqr,dt0) default(present)
-         do col = 1, ncol
-            do klev = lyr_surf, lyr_toa - lyr_step, lyr_step
-               sed(col,klev) = dt0(col) *                                                           &
-                    ((r(col,klev+lyr_step) * qr(col, klev+lyr_step) * velqr(col,klev+lyr_step)) -  &
-                     (r(col,klev) * qr(col, klev) * velqr(col,klev))) /                            &
-                    (r(col,klev) * (z(col, klev+lyr_step) - z(col, klev)))
-            end do
-         enddo
-
-         !$acc parallel loop gang vector &
-         !$acc present(qr,z,sed,velqr,dt0) default(present)
-         do col = 1, ncol
-            sed(col,lyr_toa) = -dt0(col) * qr(col, lyr_toa) * velqr(col,lyr_toa) /    &
-                 (0.5_kind_phys * (z(col, lyr_toa)-z(col, lyr_toa-lyr_step)))
-         enddo
-
-         !$acc parallel loop collapse(2) gang vector &
-         !$acc present(qc,qr,qv,pk,theta,cpair,sed,r,pc,f5,dt0,mask) default(present)
-         do col = 1, ncol
-            ! Adjustment terms
-            do klev = lyr_surf, lyr_toa, lyr_step
-
-               ! Autoconversion and collection rates following Klemp and Wilhelmson (1978), Eqs. (2.13a,b)
-               ! the collection process is handled with a semi-implicit time stepping approach
-               qrprod = qc(col, klev) - (qc(col, klev) - dt0(col) *           &
-                    max(.001_kind_phys * (qc(col, klev)-.001_kind_phys), &
-                        0._kind_phys)) /                                 &
-                        (1._kind_phys + dt0(col) * 2.2_kind_phys *            &
-                         qr(col, klev)**.875_kind_phys)
-               qc(col, klev) = max(qc(col, klev) - qrprod, 0._kind_phys)
-               qr(col, klev) = max(qr(col, klev) + qrprod + sed(col,klev), 0._kind_phys)
-
-               ! Teten's formula: saturation vapor mixing ratio (gm/gm) following Klemp and Wilhelmson (1978), Eq. (2.11)
-               qvs = pc(col,klev) * exp(f2x*(pk(col, klev)*theta(col, klev) - 273._kind_phys) / (pk(col, klev)*theta(col, klev) &
-                              - 36._kind_phys))
-               ! Temporary variable for the condensation rate, following Durran and Klemp (1983), Eqs. (A13-A14)
-               prod = (qv(col, klev) - qvs) / (1._kind_phys + qvs*f5(col,klev) / (pk(col, klev)*theta(col, klev) - 36._kind_phys)**2)
-
-               ! Evaporation rate following Klemp and Wilhelmson (1978) Eq. (2.14a,b), also Durran and Klemp (1983) Eqs. (A8-A9)
-               ern = min(dt0(col) * (((1.6_kind_phys + 124.9_kind_phys*(r(col,klev)*qr(col, klev))**.2046_kind_phys) * &
-                    (r(col,klev) * qr(col, klev))**.525_kind_phys) /                                              &
-                    (2550000._kind_phys * pc(col,klev) / (3.8_kind_phys*qvs) + 540000._kind_phys)) *              &
-                    (dim(qvs,qv(col, klev)) / (r(col,klev)*qvs)),                                                 &
-                    max(-prod-qc(col, klev),0._kind_phys),qr(col, klev))
-
-               ! Saturation adjustment following Durran and Klemp (1983) Eqs. (A1-A4), also Klemp and Wilhelmson (1978) Eq. (3.10)
-               theta(col, klev)= theta(col, klev) + mask(col) * (lv / (cpair(col,klev) * pk(col, klev)) * (max(prod,-qc(col, klev)) - ern))
-               qv(col, klev) = mask(col) * (max(qv(col, klev) - max(prod, -qc(col, klev)) + ern, 0._kind_phys)) &
-                             + (1._kind_phys - mask(col))*qv(col,klev)
-               qc(col, klev) = qc(col, klev) + mask(col) * max(prod, -qc(col, klev))
-               qr(col, klev) = mask(col) * (max(qr(col, klev) - ern, 0._kind_phys)) &
-                             + (1._kind_phys - mask(col))*qr(col, klev)
-            end do
-          enddo
-
-          !$acc parallel loop gang vector present(time_counter,mask,dt0) default(present)
-          do col = 1, ncol
-          ! Compute the elapsed time
-            time_counter(col) = time_counter(col) + mask(col) * dt0(col)
-            dt0(col) = max(dt -  time_counter(col), 0.0_kind_phys)
-            ! Construct a mask that if a columns have satisfied an exit condition
-            !    has not converged = 1.0
-            !    has converged = 0.0
-             if (abs(dt - time_counter(col)) > 1.0E-5_kind_phys) then
-                mask(col) = 1._kind_phys
-             else
-                mask(col) = 0._kind_phys
-             endif
-          end do ! column loop
-
-          ! Recalculate liquid water terminal velocity (m/s)
-          !$acc parallel loop collapse(2) gang vector &
-          !$acc present(qr,velqr,rhalf,r) default(present)
-          do col = 1, ncol
-             do klev = lyr_surf, lyr_toa, lyr_step
-                velqr(col,klev)  = 36.34_kind_phys * rhalf(col,klev) * (qr(col, klev)*r(col,klev))**0.1364_kind_phys
-             end do
-          end do ! column loop
-
-          ! recompute the time step
-          !$acc parallel loop gang &
-          !$acc present(z,velqr,dt0) private(dtmin) default(present)
-          do col = 1, ncol
-             dtmin = dt0(col)
-             !$acc loop vector reduction(min:dtmin)
-             do klev = lyr_surf, lyr_toa - lyr_step, lyr_step
-                if (abs(velqr(col,klev)) > 1.0E-12_kind_phys) then
-                   dtmin = min(dtmin, 0.8_kind_phys*(z(col, klev+lyr_step) - z(col, klev)) / velqr(col,klev))
-                end if
-             end do
-             dt0(col) = dtmin
-          end do ! column loop
-
-          ! check to see if all columns have satisfied the condition
-          all_converged = all_equal(ncol, mask, 0._kind_phys)
-          iterCnt=iterCnt+1
-
-      end do  ! do while loop
-
-      !$acc parallel loop gang vector present(precl,precl_acc) default(present)
-      do col=1,ncol
-         ! compute the average preciptation rate over the physics time step period
-         precl(col) = precl_acc(col) / dt
-      end do ! column loop
-
-      ! Diagnostic: relative humidity (relhum)
-      !$acc parallel loop collapse(2) gang vector &
-      !$acc present(pk,theta,relhum,qv,pc) default(present)
-      do col = 1,ncol
-         do klev = lyr_surf,lyr_toa,lyr_step
-            ! Saturation vapor mixing ratio (gm/gm)
-            qvs = pc(col,klev) * exp(f2x*(pk(col, klev)*theta(col, klev) - 273._kind_phys) / (pk(col, klev)*theta(col, klev) &
-                           - 36._kind_phys))
-            relhum(col,klev) = qv(col,klev) / qvs * 100._kind_phys ! in percent
-          enddo
-      end do ! column loop
-
-      !$acc exit data delete(r,rhalf,velqr,sed,pc,f5,dt0,mask,time_counter,precl_acc)
-
-      !print *,'iteration Cnt: ',iterCnt
-
-   end subroutine kessler_runv1
-
-   subroutine kessler_runv2(ncol, nz, dt, lyr_surf, lyr_toa, cpair, rair, rho, z, &
+   subroutine kessler_run(ncol, nz, dt, lyr_surf, lyr_toa, cpair, rair, rho, z, &
         pk, theta, qv, qc, qr, precl, relhum, scheme_name, errmsg, errflg)
 
       !------------------------------------------------
@@ -618,7 +322,7 @@ CONTAINS
 
       !print *,'iteration Cnt: ',iterCnt
 
-   end subroutine kessler_runv2
+   end subroutine kessler_run
 
    !=======================================================================
    logical function all_equal(n, data,val) 
@@ -644,21 +348,21 @@ CONTAINS
 
     end function all_equal
 
-   subroutine kessler_run(ncol, nz, dt, lyr_surf, lyr_toa, cpair, rair, rho, z, &
-        pk, theta, qv, qc, qr, precl, relhum, scheme_name, errmsg, errflg)
-      integer,          intent(in)    :: ncol, nz
-      real(kind_phys),  intent(in)    :: dt
-      integer,          intent(in)    :: lyr_surf, lyr_toa
-      real(kind_phys),  intent(in)    :: cpair(:,:), rair(:,:)
-      real(kind_phys),  intent(in)    :: rho(:,:), z(:,:), pk(:,:)
-      real(kind_phys),  intent(inout) :: theta(:,:), qv(:,:)
-      real(kind_phys),  intent(inout) :: qc(:,:), qr(:,:)
-      real(kind_phys),  intent(out)   :: precl(:), relhum(:,:)
-      character(len=64),intent(out)   :: scheme_name
-      character(len=*), intent(out)   :: errmsg
-      integer,          intent(out)   :: errflg
-      call kessler_runv2(ncol, nz, dt, lyr_surf, lyr_toa, cpair, rair, rho, z, &
-           pk, theta, qv, qc, qr, precl, relhum, scheme_name, errmsg, errflg)
-   end subroutine kessler_run
+!   subroutine kessler_run(ncol, nz, dt, lyr_surf, lyr_toa, cpair, rair, rho, z, &
+!        pk, theta, qv, qc, qr, precl, relhum, scheme_name, errmsg, errflg)
+!      integer,          intent(in)    :: ncol, nz
+!      real(kind_phys),  intent(in)    :: dt
+!      integer,          intent(in)    :: lyr_surf, lyr_toa
+!      real(kind_phys),  intent(in)    :: cpair(:,:), rair(:,:)
+!      real(kind_phys),  intent(in)    :: rho(:,:), z(:,:), pk(:,:)
+!      real(kind_phys),  intent(inout) :: theta(:,:), qv(:,:)
+!      real(kind_phys),  intent(inout) :: qc(:,:), qr(:,:)
+!      real(kind_phys),  intent(out)   :: precl(:), relhum(:,:)
+!      character(len=64),intent(out)   :: scheme_name
+!      character(len=*), intent(out)   :: errmsg
+!      integer,          intent(out)   :: errflg
+!      call kessler_runv2(ncol, nz, dt, lyr_surf, lyr_toa, cpair, rair, rho, z, &
+!           pk, theta, qv, qc, qr, precl, relhum, scheme_name, errmsg, errflg)
+!   end subroutine kessler_run
 
 end module kessler

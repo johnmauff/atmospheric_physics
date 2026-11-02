@@ -47,21 +47,18 @@
   type = real | kind = kind_phys
   units = K
   dimensions = (horizontal_dimension, vertical_layer_dimension)
-  memory_space = device
   intent = in
 [ temp_prev ]
   standard_name = air_temperature_on_previous_timestep
   units = K
   dimensions = (horizontal_dimension, vertical_layer_dimension)
   type = real | kind = kind_phys
-  memory_space = device
   intent = out
 [ ttend_t ]
   standard_name = tendency_of_air_temperature_due_to_model_physics
   units = K s-1
   dimensions = (horizontal_dimension, vertical_layer_dimension)
   type = real | kind = kind_phys
-  memory_space = device
   intent = out
 [ errmsg ]
   standard_name = ccpp_error_message
@@ -108,7 +105,6 @@
   units = K
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   type = real | kind = kind_phys
-  memory_space = device
   intent = in
 [ exner ]
   standard_name = dimensionless_exner_function
@@ -116,21 +112,18 @@
   units = 1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
-  memory_space = device
   intent = in
 [ temp_prev ]
   standard_name = air_temperature_on_previous_timestep
   units = K
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   type = real | kind = kind_phys
-  memory_space = device
   intent = in
 [ ttend_t ]
   standard_name = tendency_of_air_temperature_due_to_model_physics
   type = real | kind = kind_phys
   units = K s-1
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
-  memory_space = device
   intent = inout
 [ errmsg ]
   standard_name = ccpp_error_message
@@ -169,14 +162,12 @@
   units = J kg-1 K-1
   type = real | kind = kind_phys
   dimensions = (horizontal_dimension, vertical_layer_dimension)
-  memory_space = device
   intent = in
 [ temp ]
   standard_name = air_temperature
   type = real | kind = kind_phys
   units = K
   dimensions = (horizontal_dimension, vertical_layer_dimension)
-  memory_space = device
   intent = in
 [ zm ]
   standard_name = geopotential_height_wrt_surface
@@ -184,14 +175,12 @@
   type = real | kind = kind_phys
   units = m
   dimensions = (horizontal_dimension, vertical_layer_dimension)
-  memory_space = device
   intent = in
 [ phis ]
   standard_name = surface_geopotential
   type = real | kind = kind_phys
   units = m2 s-2
   dimensions = (horizontal_dimension)
-  memory_space = device
   intent = in
 [ st_energy ]
   standard_name = dry_static_energy
@@ -199,7 +188,6 @@
   type = real | kind = kind_phys
   units = J kg-1
   dimensions = (horizontal_dimension, vertical_layer_dimension)
-  memory_space = device
   intent = out
 [ errflg ]
   standard_name = ccpp_error_code
