@@ -94,23 +94,24 @@ CONTAINS
       integer                      :: klyr            ! Vertical layer index
       integer                      :: kint            ! Vertical interface index
       integer                      :: cidx            ! CCPP constituent index
+      integer                      :: iw              ! Index into water_idx
+      integer                      :: nwater          ! Number of thermodynamically active water species
+      integer                      :: water_idx(ncnst) ! Their constituent indices, ascending
       integer                      :: lyr_step        ! increment to move up a level
       integer                      :: int_step        ! increment to move up a level
-      real(kind_phys)              :: hkk(ncol)       ! diagonal element of hydrostatic matrix
-      real(kind_phys)              :: hkl(ncol)       ! off-diagonal element
-      real(kind_phys)              :: rog(ncol,pver)  ! Rair / gravit
+      real(kind_phys)              :: hkk             ! diagonal element of hydrostatic matrix
+      real(kind_phys)              :: hkl             ! off-diagonal element
+      real(kind_phys)              :: rog             ! Rair / gravit
       real(kind_phys)              :: tv              ! virtual temperature
       real(kind_phys)              :: tvfac           ! Tv / T
-      real(kind_phys)              :: qfac(ncol,pver) ! factor to convert from wet to dry mixing ratio
-      real(kind_phys)              :: sum_dry_mixing_ratio(ncol,pver) ! sum of dry water mixing ratios
+      real(kind_phys)              :: qfac            ! factor to convert from wet to dry mixing ratio
+      real(kind_phys)              :: sum_dry_mixing_ratio ! sum of dry water mixing ratios
       !
       !-----------------------------------------------------------------------
       !
 
       errmsg = ''
       errflg = 0
-
-      rog(:ncol,:) = rair(:ncol,:) / gravit
 
       ! Determine order of vertical dimension loop
       if (layer_surf > layer_toa) then
@@ -124,15 +125,10 @@ CONTAINS
          int_step = 1
       end if
 
-      ! The surface height is zero by definition.
-      zi(:ncol, interface_surf) = 0.0_kind_phys
-
-      ! For the computation of generalized virtual temperature (equation 16
-      ! in Lauritzen et al. (2018);  https://doi.org/10.1029/2017MS001257)
-      !
-      ! Compute factor for converting wet to dry mixing ratio (eq.7)
-      !
-      qfac        = 1._kind_phys
+      ! The thermodynamically active water species, from the constituent
+      ! properties on the host: only this plain index list goes to the
+      ! device (cprops stays on the host).
+      nwater      = 0
       active_flag = .false.
       water_flag  = .false.
       do cidx = 1,ncnst
@@ -142,78 +138,81 @@ CONTAINS
             ! Check if consitutent is also a water species:
             call cprops(cidx)%is_water_species(water_flag)
             if (water_flag) then
-               do klyr = layer_surf, layer_toa, lyr_step
-                  do icol = 1, ncol
-                     ! Add thermodynamically active water species
-                     ! to mixing ratio factor:
-                     qfac(icol, klyr) = qfac(icol, klyr) -                    &
-                                        carr(icol, klyr, cidx)
-                  end do
-               end do
+               nwater = nwater + 1
+               water_idx(nwater) = cidx
             end if
          end if
       end do
-      qfac = 1._kind_phys/qfac
 
-      ! Compute sum of thermodynamically active water
-      ! constituent mixing ratios with respect to dry air:
-      sum_dry_mixing_ratio = 1._kind_phys
-      active_flag          = .false.
-      water_flag           = .false.
-      do cidx = 1,ncnst
-         !Check if constituent is thermodynamically active:
-         call cprops(cidx)%is_thermo_active(active_flag)
-         if (active_flag) then
-            !Check if consitutent is also a water species:
-            call cprops(cidx)%is_water_species(water_flag)
-            if (water_flag) then
-               do klyr = layer_surf, layer_toa, lyr_step
-                  do icol = 1, ncol
-                     sum_dry_mixing_ratio(icol, klyr) =                       &
-                        sum_dry_mixing_ratio(icol, klyr) +                    &
-                        carr(icol, klyr, cidx) * qfac(icol,klyr)
-                  end do
-               end do
+      ! One GPU kernel, parallel over columns; each column integrates its
+      ! levels in order (zi at a level depends on the one below). The data
+      ! clauses are present-or-copy: arrays already on the device are used
+      ! in place.
+      !
+      ! carr gets its own, outer data region: in CAM-SIMA qv is a view into
+      ! the constituent array carr, and mapping qv first would leave carr
+      ! partially present (a fatal error). Inside this region qv is part of
+      ! present data, whether or not it aliases carr.
+      !$acc data copyin(carr)
+      !$acc parallel loop gang vector                                          &
+      !$acc copyin(piln, pint, pmid, pdel, rpdel, temp, qv, rair, zvir,        &
+      !$acc        water_idx) copy(zi, zm)                                     &
+      !$acc private(klyr, kint, iw, hkk, hkl, rog, tv, tvfac, qfac,            &
+      !$acc         sum_dry_mixing_ratio)
+      do icol = 1, ncol
+
+         ! The surface height is zero by definition.
+         zi(icol, interface_surf) = 0.0_kind_phys
+
+         ! Compute zi, zm from bottom up.
+         ! Note, zi(i,k) is the interface above zm(i,k) when ordered top to bot
+         klyr = layer_surf
+         do kint = interface_surf + int_step, interface_toa, int_step
+
+            ! For the computation of generalized virtual temperature
+            ! (equation 16 in Lauritzen et al. (2018);
+            ! https://doi.org/10.1029/2017MS001257)
+            !
+            ! Factor for converting wet to dry mixing ratio (eq.7): subtract
+            ! the thermodynamically active water species.
+            qfac = 1._kind_phys
+            do iw = 1, nwater
+               qfac = qfac - carr(icol, klyr, water_idx(iw))
+            end do
+            qfac = 1._kind_phys/qfac
+
+            ! Sum of thermodynamically active water constituent mixing
+            ! ratios with respect to dry air:
+            sum_dry_mixing_ratio = 1._kind_phys
+            do iw = 1, nwater
+               sum_dry_mixing_ratio = sum_dry_mixing_ratio +                  &
+                    carr(icol, klyr, water_idx(iw)) * qfac
+            end do
+            sum_dry_mixing_ratio = 1._kind_phys/sum_dry_mixing_ratio
+
+            rog = rair(icol,klyr) / gravit
+
+            ! First set hydrostatic elements consistent with dynamics
+            if (lagrang) then
+               hkl = piln(icol, kint-int_step) - piln(icol,kint)
+               hkk = 1._kind_phys - (pint(icol,kint) * hkl * rpdel(icol,klyr))
+            else
+               hkl = pdel(icol,klyr) / pmid(icol,klyr)
+               hkk = 0.5_kind_phys * hkl
             end if
-         end if
-      end do
-      sum_dry_mixing_ratio(:,:) = 1._kind_phys/sum_dry_mixing_ratio(:,:)
 
-      ! Compute zi, zm from bottom up.
-      ! Note, zi(i,k) is the interface above zm(i,k) when ordered top to bot
-
-      klyr = layer_surf
-      do kint = interface_surf + int_step, interface_toa, int_step
-
-         ! First set hydrostatic elements consistent with dynamics
-         if (lagrang) then
-            do icol = 1, ncol
-               hkl(icol) = piln(icol, kint-int_step) - piln(icol,kint)
-               hkk(icol) = 1._kind_phys -                                     &
-                    (pint(icol,kint) * hkl(icol) * rpdel(icol,klyr))
-            end do
-         else
-            do icol = 1,ncol
-               hkl(icol) = pdel(icol,klyr) / pmid(icol,klyr)
-               hkk(icol) = 0.5_kind_phys * hkl(icol)
-            end do
-         end if
-
-         ! Now compute tv, zm, zi
-
-         do icol = 1, ncol
+            ! Now compute tv, zm, zi
             tvfac   = (1._kind_phys + (zvir(icol,klyr) + 1._kind_phys) *      &
-                      qv(icol,klyr)*qfac(icol,klyr)) *                        &
-                      sum_dry_mixing_ratio(icol,klyr)
+                      qv(icol,klyr)*qfac) * sum_dry_mixing_ratio
             tv      = temp(icol,klyr) * tvfac
 
-            zm(icol,klyr) = zi(icol,kint-int_step) +                          &
-                 (rog(icol,klyr) * tv * hkk(icol))
-            zi(icol,kint) = zi(icol,kint-int_step) +                          &
-                 (rog(icol,klyr) * tv * hkl(icol))
+            zm(icol,klyr) = zi(icol,kint-int_step) + (rog * tv * hkk)
+            zi(icol,kint) = zi(icol,kint-int_step) + (rog * tv * hkl)
+
+            klyr = klyr + lyr_step
          end do
-         klyr = klyr + lyr_step
       end do
+      !$acc end data
 
    end subroutine geopotential_temp_run
 

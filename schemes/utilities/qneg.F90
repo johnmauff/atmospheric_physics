@@ -209,13 +209,9 @@ CONTAINS
       integer  :: i, k             ! longitude, level indices
       integer  :: index            ! For storing stats
       integer  :: m                ! constituent index
-      integer  :: iw,kw            ! i,k indices of worst violator
-
-      logical  :: found            ! true => at least 1 minimum violator found
-
-      real(kind_phys) :: badvals(1:num_columns, lver) ! Collector for outfld calls
-      real(kind_phys) :: badcols(1:num_columns)       ! Column sum for outfld
-      real(kind_phys) :: worst                        ! biggest violator
+      integer  :: nvals_m(num_constituents)         ! nvals per constituent
+      real(kind_phys) :: worst                      ! biggest violator
+      real(kind_phys) :: worst_m(num_constituents)  ! worst per constituent
       !
       !-----------------------------------------------------------------------
       !
@@ -234,54 +230,60 @@ CONTAINS
          index = -1
       end if
 
+      !
+      ! Test all field values for being less than minimum value. Set q = qmin
+      ! for all such points; count the offenders and find the worst one, per
+      ! constituent. One GPU kernel: a gang per constituent, the levels and
+      ! columns reduced by its vector lanes. The data clauses are
+      ! present-or-copy: q is used in place when it is already on the device.
+      !
+      !$acc parallel loop gang copyin(qmin) copy(q) copyout(nvals_m, worst_m) &
+      !$acc private(nvals, worst)
       do m = 1, num_constituents
          nvals = 0
-         found = .false.
          worst = worst_reset
-         badvals(:,:) = 0.0_kind_phys
-         iw = -1
-         kw = -1
-         !
-         ! Test all field values for being less than minimum value. Set q = qmin
-         ! for all such points. Trace offenders and identify worst one.
-         !
-
+         !$acc loop vector collapse(2) reduction(+:nvals) reduction(min:worst)
          do k = 1, lver
             do i = 1, num_columns
                if (q(i,k,m) < qmin(m)) then
-                  found = .true.
                   nvals = nvals + 1
-                  badvals(i, k) = q(i, k, m)
-                  if (index > 0) then
-                     qneg_warn_num(m, index) = qneg_warn_num(m, index) + 1
-                  end if
-                  if (q(i,k,m) < worst) then
-                     worst = q(i,k,m)
-                     iw = i
-                     kw = k
-                     if (index > 0) then
-                        qneg_warn_worst(m, index) = worst
-                     end if
-                  end if
+                  worst = min(worst, q(i,k,m))
                   q(i,k,m) = qmin(m)
                end if
             end do
          end do
+         nvals_m(m) = nvals
+         worst_m(m) = worst
+      end do
+
+      ! Statistics for the summary (qneg_timestep_final), on the host.
+      if (index > 0) then
+         do m = 1, num_constituents
+            qneg_warn_num(m, index) = qneg_warn_num(m, index) + nvals_m(m)
+            if (nvals_m(m) > 0) then
+               qneg_warn_worst(m, index) = worst_m(m)
+            end if
+         end do
+      end if
+
 !!XXgoldyXX: v Reinstate when history is implemented
 #if 0
+      ! When reinstated, the kernel above must also collect badvals(i,k)
+      ! (the offending q values) per constituent for these outfld calls.
+      do m = 1, num_constituents
          ! Maybe output bad values
-         if ((cnst_outfld(m)) .and. (worst < worst_reset)) then
+         if ((cnst_outfld(m)) .and. (worst_m(m) < worst_reset)) then
             call outfld(trim(diag_names(m)), badvals, pcols, idx)
          end if
-         if ((cnst_outfld(num_constituents+m)) .and. (worst < worst_reset)) then
+         if ((cnst_outfld(num_constituents+m)) .and. (worst_m(m) < worst_reset)) then
             do i = 1, pcols
                badcols(i) = SUM(badvals(i,:))
             end do
             call outfld(trim(diag_names(num_constituents+m)), badcols, pcols, idx)
          end if
+      end do
 #endif
 !!XXgoldyXX: ^ Reinstate when history is implemented
-      end do
 
       ! Set qneg_timestep_finalized to .false.
       qneg_timestep_finalized = .false.
