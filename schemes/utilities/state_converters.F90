@@ -54,10 +54,13 @@ CONTAINS
     character(len=*), intent(out) :: errmsg
     integer,          intent(out) :: errflg
     ! Local variable
-    integer                       :: col
+    integer                       :: col, i
 
+    !$acc parallel loop collapse(2) copyin(temp, exner) copy(theta)
     do col = 1, nz
-      theta(:ncol, col) = temp(:ncol, col) / exner(:ncol, col)
+      do i = 1, ncol
+        theta(i, col) = temp(i, col) / exner(i, col)
+      end do
     end do
     errflg = 0
     errmsg = ''
@@ -75,10 +78,13 @@ CONTAINS
     character(len=*), intent(out) :: errmsg
     integer,          intent(out) :: errflg
     ! Local variable
-    integer                       :: col
+    integer                       :: col, i
 
+    !$acc parallel loop collapse(2) copyin(theta, exner) copy(temp)
     do col = 1, nz
-      temp(:ncol, col) = theta(:ncol, col) * exner(:ncol, col)
+      do i = 1, ncol
+        temp(i, col) = theta(i, col) * exner(i, col)
+      end do
     end do
     errflg = 0
     errmsg = ''
@@ -134,10 +140,13 @@ CONTAINS
     character(len=*), intent(out)   :: errmsg
     integer,          intent(out)   :: errflg
 
-    integer :: k
+    integer :: k, i
 
+    !$acc parallel loop collapse(2) copyin(rair, pmiddry, temp) copy(rho)
     do k = 1, nz
-      rho(:ncol,k) = pmiddry(:ncol,k)/(rair(:ncol,k)*temp(:ncol,k))
+      do i = 1, ncol
+        rho(i,k) = pmiddry(i,k)/(rair(i,k)*temp(i,k))
+      end do
     end do
 
     errmsg = ''
@@ -205,10 +214,13 @@ CONTAINS
     character(len=*), intent(out) :: errmsg
     integer,          intent(out) :: errflg
 
-    integer :: i
+    integer :: i, k
 
-    do i=1,nz
-      exner(:ncol,i) = (pmid(:ncol,i)/ref_pres)**(rair(:ncol,i)/cpair(:ncol,i))
+    !$acc parallel loop collapse(2) copyin(cpair, rair, pmid) copy(exner)
+    do k = 1, nz
+      do i = 1, ncol
+        exner(i,k) = (pmid(i,k)/ref_pres)**(rair(i,k)/cpair(i,k))
+      end do
     end do
 
     errflg = 0
@@ -230,13 +242,16 @@ CONTAINS
      character(len=*), intent(out) :: errmsg
      integer,          intent(out) :: errflg
 
-     integer :: k
+     integer :: k, i
 
      errflg = 0
      errmsg = ''
 
+     !$acc parallel loop collapse(2) copyin(pdel, pdeldry, qv) copy(qv_dry)
      do k = 1, nz
-       qv_dry(:ncol,k) = qv(:ncol,k) * (pdel(:ncol,k) / pdeldry(:ncol,k))
+       do i = 1, ncol
+         qv_dry(i,k) = qv(i,k) * (pdel(i,k) / pdeldry(i,k))
+       end do
      end do
 
   end subroutine wet_to_dry_water_vapor_run
@@ -255,13 +270,16 @@ CONTAINS
      character(len=*), intent(out) :: errmsg
      integer,          intent(out) :: errflg
 
-     integer :: k
+     integer :: k, i
 
      errflg = 0
      errmsg = ''
 
+     !$acc parallel loop collapse(2) copyin(pdel, pdeldry, qc) copy(qc_dry)
      do k = 1, nz
-       qc_dry(:ncol,k) = qc(:ncol,k) * (pdel(:ncol,k) / pdeldry(:ncol,k))
+       do i = 1, ncol
+         qc_dry(i,k) = qc(i,k) * (pdel(i,k) / pdeldry(i,k))
+       end do
      end do
 
   end subroutine wet_to_dry_cloud_liquid_water_run
@@ -305,13 +323,16 @@ CONTAINS
      character(len=*), intent(out) :: errmsg
      integer,          intent(out) :: errflg
 
-     integer :: k
+     integer :: k, i
 
      errflg = 0
      errmsg = ''
 
+     !$acc parallel loop collapse(2) copyin(pdel, pdeldry, qr) copy(qr_dry)
      do k = 1, nz
-       qr_dry(:ncol,k) = qr(:ncol,k) * (pdel(:ncol,k) / pdeldry(:ncol,k))
+       do i = 1, ncol
+         qr_dry(i,k) = qr(i,k) * (pdel(i,k) / pdeldry(i,k))
+       end do
      end do
 
   end subroutine wet_to_dry_rain_run
@@ -376,13 +397,16 @@ CONTAINS
      character(len=*), intent(out) :: errmsg
      integer,          intent(out) :: errflg
 
-     integer :: k
+     integer :: k, i
 
      errflg = 0
      errmsg = ''
 
+     !$acc parallel loop collapse(2) copyin(pdel, pdeldry, qv_dry) copy(qv)
      do k = 1, nz
-       qv(:ncol,k) = qv_dry(:ncol,k) * (pdeldry(:ncol,k) / pdel(:ncol,k))
+       do i = 1, ncol
+         qv(i,k) = qv_dry(i,k) * (pdeldry(i,k) / pdel(i,k))
+       end do
      end do
 
   end subroutine dry_to_wet_water_vapor_run
@@ -401,13 +425,16 @@ CONTAINS
      character(len=*), intent(out) :: errmsg
      integer,          intent(out) :: errflg
 
-     integer  :: k
+     integer  :: k, i
 
      errflg = 0
      errmsg = ''
 
+     !$acc parallel loop collapse(2) copyin(pdel, pdeldry, qc_dry) copy(qc)
      do k = 1, nz
-       qc(:ncol,k) = qc_dry(:ncol,k) * (pdeldry(:ncol,k) / pdel(:ncol,k))
+       do i = 1, ncol
+         qc(i,k) = qc_dry(i,k) * (pdeldry(i,k) / pdel(i,k))
+       end do
      end do
 
   end subroutine dry_to_wet_cloud_liquid_water_run
@@ -451,13 +478,16 @@ CONTAINS
      character(len=*), intent(out) :: errmsg
      integer,          intent(out) :: errflg
 
-     integer  :: k
+     integer  :: k, i
 
      errflg = 0
      errmsg = ''
 
+     !$acc parallel loop collapse(2) copyin(pdel, pdeldry, qr_dry) copy(qr)
      do k = 1, nz
-       qr(:ncol,k) = qr_dry(:ncol,k) * (pdeldry(:ncol,k) / pdel(:ncol,k))
+       do i = 1, ncol
+         qr(i,k) = qr_dry(i,k) * (pdeldry(i,k) / pdel(i,k))
+       end do
      end do
 
   end subroutine dry_to_wet_rain_run
