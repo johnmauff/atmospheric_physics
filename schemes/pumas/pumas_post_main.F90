@@ -72,9 +72,13 @@ contains
                 max(mincld, real(strat_cldfrc(:ncol,:), pumas_r8))
 
     rei(:,:) = 25._pumas_r8
+    ! size_dist_param_basic runs an OpenACC kernel (default(present)) when
+    ! PUMAS is built for the GPU: its arguments must be on the device.
+    !$acc data copyin(mg_ice_props, icimrst) copy(niic, rei)
     do k = trop_cloud_top_lev, nlev
       call size_dist_param_basic(mg_ice_props, icimrst(:,k), niic(:,k), rei(:,k), ncol)
     end do
+    !$acc end data
 
     where (icimrst(:,:) >= qsmall)
       rei(:,:) = 1.5_pumas_r8 / rei(:,:) * 1.e6_pumas_r8
@@ -104,10 +108,13 @@ contains
 
     mu(:,:)      = 0._pumas_r8
     lambdac(:,:) = 0._pumas_r8
+    ! As for size_dist_param_basic above.
+    !$acc data copyin(mg_liq_props, icwmrst, rho) copy(ncic, mu, lambdac)
     do k = trop_cloud_top_lev, nlev
       call size_dist_param_liq(mg_liq_props, icwmrst(:,k), ncic(:,k), rho(:,k), &
                                mu(:,k), lambdac(:,k), ncol)
     end do
+    !$acc end data
 
     ! size_dist_param_liq flags no-cloud points with mu = -100 and reset to zero.
     where (icwmrst(:,trop_cloud_top_lev:) < qsmall)
