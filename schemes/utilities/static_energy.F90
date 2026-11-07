@@ -27,15 +27,19 @@ CONTAINS
       integer,            intent(out) :: errcode
       character(len=512), intent(out) :: errmsg
 
-      ! Local variable
-      integer :: klev
+      ! Local variables
+      integer :: icol, klev
 
       errcode = 0
       errmsg = ''
 
+      ! st_energy is (horizontal_loop_extent, vertical_layer_dimension).
+      !$acc parallel loop collapse(2) copyin(temp, zm, phis, cpair) copy(st_energy)
       do klev = 1, nz
-         st_energy(:, klev) = (temp(:, klev) * cpair(:,klev)) +               &
-              (gravit * zm(:, klev)) + phis(:)
+         do icol = 1, size(st_energy, 1)
+            st_energy(icol, klev) = (temp(icol, klev) * cpair(icol, klev)) +   &
+                 (gravit * zm(icol, klev)) + phis(icol)
+         end do
       end do
 
    end subroutine update_dry_static_energy_run
