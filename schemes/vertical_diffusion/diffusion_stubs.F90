@@ -93,6 +93,7 @@ contains
     errmsg = ''
     errflg = 0
 
+    !$acc kernels copy(ksrftms, tautmsx, tautmsy, taubljx, taubljy, dragblj)
     ! Set TMS drag coefficient to zero (stub implementation)
     ksrftms(:ncol) = 0._kind_phys
 
@@ -104,6 +105,7 @@ contains
 
     ! Set Beljaars 3-D drag profile to zero (stub implementation)
     dragblj(:ncol,:pver) = 0._kind_phys
+    !$acc end kernels
 
     ! Set do_beljaars flag to false
     ! note: this is actually a namelist variable in the Beljaars scheme.
