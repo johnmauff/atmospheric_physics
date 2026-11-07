@@ -31,17 +31,37 @@ contains
 
    real(kind_phys), intent(out)    :: flx_ice(:)         ! net_lwe_ice_fluxes_through_top_and_bottom_of_atmosphere_column [m s-1] for check_energy_chng
 
-   tend_s_snwprd_sh = tend_s_snwprd_gen
-   tend_s_snwevmlt_sh = tend_s_snwevmlt_gen
-   prec_sh = prec_gen
-   snow_sh = snow_gen
-   ntprprd_sh = ntprprd_gen
-   ntsnprd_sh = ntsnprd_gen
-   flxprec_sh = flxprec_gen
-   flxsnow_sh = flxsnow_gen
+   integer :: i, k
 
-   ! boundary flux for check energy
-   flx_ice = snow_sh
+   ! Copies, with the outputs' extents (the arrays are conformable):
+   ! layer fields, interface fields, then column fields.
+   !$acc parallel loop collapse(2) &
+   !$acc copyin(tend_s_snwprd_gen, tend_s_snwevmlt_gen, ntprprd_gen, ntsnprd_gen) &
+   !$acc copy(tend_s_snwprd_sh, tend_s_snwevmlt_sh, ntprprd_sh, ntsnprd_sh)
+   do k = 1, size(tend_s_snwprd_sh, 2)
+      do i = 1, size(tend_s_snwprd_sh, 1)
+         tend_s_snwprd_sh(i,k) = tend_s_snwprd_gen(i,k)
+         tend_s_snwevmlt_sh(i,k) = tend_s_snwevmlt_gen(i,k)
+         ntprprd_sh(i,k) = ntprprd_gen(i,k)
+         ntsnprd_sh(i,k) = ntsnprd_gen(i,k)
+      end do
+   end do
+
+   !$acc parallel loop collapse(2) copyin(flxprec_gen, flxsnow_gen) copy(flxprec_sh, flxsnow_sh)
+   do k = 1, size(flxprec_sh, 2)
+      do i = 1, size(flxprec_sh, 1)
+         flxprec_sh(i,k) = flxprec_gen(i,k)
+         flxsnow_sh(i,k) = flxsnow_gen(i,k)
+      end do
+   end do
+
+   ! flx_ice: boundary flux for check energy (= snow_sh)
+   !$acc parallel loop copyin(prec_gen, snow_gen) copy(prec_sh, snow_sh, flx_ice)
+   do i = 1, size(prec_sh, 1)
+      prec_sh(i) = prec_gen(i)
+      snow_sh(i) = snow_gen(i)
+      flx_ice(i) = snow_gen(i)
+   end do
 
    end subroutine set_general_conv_fluxes_to_shallow_run
 
