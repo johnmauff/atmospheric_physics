@@ -99,10 +99,12 @@ contains
     real(kind_phys) :: kt            ! 1./efolding_time for temperature diss.
     real(kind_phys) :: trefa         ! "radiative equilibrium" T
     real(kind_phys) :: trefc         ! used in calc of "radiative equilibrium" T
-    real(kind_phys) :: cossq(ncol)   ! coslat**2
-    real(kind_phys) :: cossqsq(ncol) ! coslat**4
-    real(kind_phys) :: sinsq(ncol)   ! sinlat**2
-    real(kind_phys) :: coslat(ncol)  ! cosine(latitude)
+    real(kind_phys) :: cossq         ! coslat**2
+    real(kind_phys) :: cossqsq       ! coslat**4
+    real(kind_phys) :: sinsq         ! sinlat**2
+    real(kind_phys) :: coslat        ! cosine(latitude)
+    real(kind_phys) :: pref_loc      ! pref (module variable) as a local scalar,
+                                     ! passed to the kernel by value
     !
     !-----------------------------------------------------------------------
     !
@@ -111,12 +113,7 @@ contains
     errflg = 0
     scheme_name = "HELD_SUAREZ"
 
-    do i = 1, ncol
-      coslat (i) = cos(clat(i))
-      sinsq  (i) = sin(clat(i))*sin(clat(i))
-      cossq  (i) = coslat(i)*coslat(i)
-      cossqsq(i) = cossq (i)*cossq (i)
-    end do
+    pref_loc = pref
 
     !
     !-----------------------------------------------------------------------
@@ -130,42 +127,41 @@ contains
     !
     !-----------------------------------------------------------------------
     !
-    ! Compute idealized radiative heating rates (as dry static energy)
+    ! One kernel over all points (all arrays are (horizontal_loop_extent,
+    ! vertical_layer_dimension)): the idealized radiative heating rate (as
+    ! dry static energy) and the diffusion near the surface for the wind
+    ! fields. The latitude factors are computed per point with the same
+    ! expressions as the former per-column arrays.
     !
-    !
+    !$acc parallel loop collapse(2) private(kt, kv, trefa, trefc, cossq, cossqsq, sinsq, coslat) &
+    !$acc copyin(pref_mid_norm, clat, cappa, cpair, pmid, uwnd, vwnd, temp) copy(du, dv, ds)
     do k = 1, pver
-      if (pref_mid_norm(k) > sigmab) then
-        do i = 1, ncol
-          kt      = ka + (ks - ka)*cossqsq(i)*(pref_mid_norm(k) - sigmab)/onemsig
-          trefc   = 315._kind_phys - (60._kind_phys * sinsq(i))
-          trefa   = (trefc - 10._kind_phys*cossq(i)*log((pmid(i,k)/pref)))*(pmid(i,k)/pref)**cappa(i,k)
+      do i = 1, ncol
+        coslat  = cos(clat(i))
+        sinsq   = sin(clat(i))*sin(clat(i))
+        cossq   = coslat*coslat
+        cossqsq = cossq*cossq
+
+        if (pref_mid_norm(k) > sigmab) then
+          kt      = ka + (ks - ka)*cossqsq*(pref_mid_norm(k) - sigmab)/onemsig
+          trefc   = 315._kind_phys - (60._kind_phys * sinsq)
+          trefa   = (trefc - 10._kind_phys*cossq*log((pmid(i,k)/pref_loc)))*(pmid(i,k)/pref_loc)**cappa(i,k)
           trefa   = max(t00,trefa)
           ds(i,k) = (trefa - temp(i,k))*kt*cpair(i,k)
-        end do
-      else
-        do i = 1, ncol
-          trefc   = 315._kind_phys - 60._kind_phys*sinsq(i)
-          trefa   = (trefc - 10._kind_phys*cossq(i)*log((pmid(i,k)/pref)))*(pmid(i,k)/pref)**cappa(i,k)
-          trefa   = max(t00,trefa)
-          ds(i,k) = (trefa - temp(i,k))*ka*cpair(i,k)
-        end do
-      end if
-    end do
-    !
-    ! Add diffusion near the surface for the wind fields
-    !
-    du(:,:) = 0._kind_phys
-    dv(:,:) = 0._kind_phys
 
-    !
-    do k = 1, pver
-      if (pref_mid_norm(k) > sigmab) then
-        kv  = kf*(pref_mid_norm(k) - sigmab)/onemsig
-        do i = 1, ncol
+          kv      = kf*(pref_mid_norm(k) - sigmab)/onemsig
           du(i,k) = -kv*uwnd(i,k)
           dv(i,k) = -kv*vwnd(i,k)
-        end do
-      end if
+        else
+          trefc   = 315._kind_phys - 60._kind_phys*sinsq
+          trefa   = (trefc - 10._kind_phys*cossq*log((pmid(i,k)/pref_loc)))*(pmid(i,k)/pref_loc)**cappa(i,k)
+          trefa   = max(t00,trefa)
+          ds(i,k) = (trefa - temp(i,k))*ka*cpair(i,k)
+
+          du(i,k) = 0._kind_phys
+          dv(i,k) = 0._kind_phys
+        end if
+      end do
     end do
 
   end subroutine held_suarez_1994_run
