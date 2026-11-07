@@ -62,15 +62,14 @@ contains
     !
     !---------------------------Local workspace-----------------------------
     !
-    integer  :: k,m           ! Longitude, level indices
-    real(kind_phys) :: fdq(ncol)    ! mass adjustment factor
-
-    real(kind_phys) :: tot_water (ncol,2)  ! total water (initial, present)
-    real(kind_phys) :: tot_water_chg(ncol) ! total water change
-
+    integer  :: i,k,m         ! Column, level and constituent indices
+    real(kind_phys) :: fdq          ! mass adjustment factor
+    real(kind_phys) :: tot_water_ini ! total water, initial
+    real(kind_phys) :: tot_water_now ! total water, present
 
     integer :: m_cnst
     logical :: water_flag, active_flag
+    logical :: is_thermo_water(pcnst)  ! water species that are thermodynamically active
 
     errmsg = ' '
     errflg = 0
@@ -80,34 +79,45 @@ contains
 
     if (.not. is_dycore_moist) return
 
+    ! The constituent properties are queried on the host (type-bound
+    ! procedures), once, not per level.
+    do m_cnst = 1, pcnst
+      call const_props(m_cnst)%is_water_species(water_flag)
+      call const_props(m_cnst)%is_thermo_active(active_flag)
+      is_thermo_water(m_cnst) = water_flag .and. active_flag
+    end do
+
     !
     !-----------------------------------------------------------------------
     ! adjust dry mass in each layer back to input value, while conserving
-    ! constituents, momentum, and total energy
-    ps(:) = pint(:,1)
-
-    do k = 1, pver
-      tot_water(:,1) = qini(:,k) +liqini(:,k)+iceini(:,k) !initial total H2O
-      tot_water(:,2) = 0.0_kind_phys
-      do m_cnst=1,pcnst
-        call const_props(m_cnst)%is_water_species(water_flag)
-        call const_props(m_cnst)%is_thermo_active(active_flag)
-        if(water_flag .and. active_flag) then
-          tot_water(:,2) = tot_water(:,2)+const_array(:,k,m_cnst)
-        end if
+    ! constituents, momentum, and total energy.
+    ! Columns are independent; the levels of a column are not (ps and pint
+    ! accumulate downward), so the loop runs over columns, levels in order.
+    !$acc parallel loop gang vector copyin(is_thermo_water, qini, liqini, iceini) &
+    !$acc   copy(ps, pint, pdel, lnpint, rpdel, const_array)
+    do i = 1, ncol
+      ps(i) = pint(i,1)
+      do k = 1, pver
+        tot_water_ini = qini(i,k) + liqini(i,k) + iceini(i,k) ! initial total H2O
+        tot_water_now = 0.0_kind_phys
+        do m = 1, pcnst
+          if (is_thermo_water(m)) then
+            tot_water_now = tot_water_now + const_array(i,k,m)
+          end if
+        end do
+        fdq = 1._kind_phys + tot_water_now - tot_water_ini
+        ! adjust constituents to conserve mass in each layer
+        do m = 1, pcnst
+          const_array(i,k,m) = const_array(i,k,m) / fdq
+        end do
+        ! compute new total pressure variables
+        pdel  (i,k  ) = pdel(i,k  ) * fdq
+        ps(i)         = ps(i)       + pdel(i,k)
+        pint  (i,k+1) = pint(i,k  ) + pdel(i,k)
+        lnpint(i,k+1) = log(pint(i,k+1))
+        rpdel (i,k  ) = 1._kind_phys / pdel(i,k  )
+        !note that mid-level variables (e.g. pmid) are not recomputed
       end do
-      fdq(:) = 1._kind_phys + tot_water(:,2) - tot_water(:,1)
-      ! adjust constituents to conserve mass in each layer
-      do m = 1, pcnst
-        const_array(:,k,m) = const_array(:,k,m) / fdq(:)
-      end do
-      ! compute new total pressure variables
-      pdel  (:,k  ) = pdel(:,k  ) * fdq(:)
-      ps(:)         = ps(:)       + pdel(:,k)
-      pint  (:,k+1) = pint(:,k  ) + pdel(:,k)
-      lnpint(:,k+1) = log(pint(:,k+1))
-      rpdel (:,k  ) = 1._kind_phys/ pdel(:,k  )
-      !note that mid-level variables (e.g. pmid) are not recomputed
     end do
 
   end subroutine dme_adjust_run
