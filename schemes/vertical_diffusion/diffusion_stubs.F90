@@ -139,12 +139,14 @@ contains
     errmsg = ''
     errflg = 0
 
+    !$acc kernels copy(taubljx, taubljy, dragblj)
     ! Set all Beljaars stresses to zero (stub implementation)
     taubljx(:ncol) = 0._kind_phys
     taubljy(:ncol) = 0._kind_phys
 
     ! Set Beljaars 3-D drag profile to zero (stub implementation)
     dragblj(:ncol,:pver) = 0._kind_phys
+    !$acc end kernels
 
     ! Set do_beljaars flag to false
     ! note: this is actually a namelist variable in the Beljaars scheme.
@@ -179,7 +181,9 @@ contains
     errmsg = ''
     errflg = 0
 
+    !$acc kernels copyin(ksrftms) copy(ksrf)
     ksrf(:ncol) = ksrf(:ncol) + ksrftms(:ncol)
+    !$acc end kernels
 
   end subroutine turbulent_mountain_stress_add_drag_coefficient_run
 
@@ -307,21 +311,24 @@ contains
     integer,            intent(out)   :: errflg
 
     ! Local variables
-    real(kind_phys) :: flux_to_state_conversion_factor(ncol)
-    integer         :: m
+    real(kind_phys) :: flux_to_state_conversion_factor  ! [kg-1 m2 s]
+    integer         :: i, m
 
     errmsg = ''
     errflg = 0
 
-    flux_to_state_conversion_factor(:ncol) = dt*gravit*rpdel(:ncol, pver)
-
     ! Apply surface fluxes only to constituents not handled by vertical diffusion
+    !$acc parallel loop collapse(2) private(flux_to_state_conversion_factor) &
+    !$acc   copyin(do_diffusion_const, cflux, rpdel) copy(q1)
     do m = 1, ncnst
-       if (.not. do_diffusion_const(m)) then
-          ! Add surface flux contribution to constituent array at lowest model layer
-          q1(:ncol, pver, m) = q1(:ncol, pver, m) + &
-                                         flux_to_state_conversion_factor(:ncol) * cflux(:ncol, m)
-       end if
+       do i = 1, ncol
+          if (.not. do_diffusion_const(m)) then
+             ! Add surface flux contribution to constituent array at lowest model layer
+             flux_to_state_conversion_factor = dt*gravit*rpdel(i, pver)
+             q1(i, pver, m) = q1(i, pver, m) + &
+                              flux_to_state_conversion_factor * cflux(i, m)
+          end if
+       end do
     end do
 
   end subroutine dropmixnuc_apply_surface_fluxes_run

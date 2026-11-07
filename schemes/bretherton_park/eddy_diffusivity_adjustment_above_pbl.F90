@@ -64,6 +64,7 @@ contains
     ! Only apply adjustment if scaling factors differ from unity
     if ((kv_freetrop_scale /= 1.0_kind_phys) .or. &
         ((kv_top_scale /= 1.0_kind_phys) .and. (kv_top_pressure > 0.0_kind_phys))) then
+      !$acc parallel loop collapse(2) copyin(zi, pint, pblh) copy(kvh, kvm, kvq)
       do i = 1, ncol
         do k = 1, pverp
           ! Outside of the boundary layer?
