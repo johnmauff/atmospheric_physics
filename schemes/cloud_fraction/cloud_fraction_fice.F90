@@ -52,12 +52,17 @@ contains
     tmax_fsnow = tmelt                ! max temperature for transition to convective snow
     tmin_fsnow = tmelt - 5._kind_phys        ! min temperature for transition to convective snow
 
-    fice(:,:top_lev-1) = 0._kind_phys
-    fsnow(:,:top_lev-1) = 0._kind_phys
+! One kernel over all (horizontal_loop_extent, vertical_layer_dimension)
+! points: zero above top_lev, as before, and the fractions from top_lev down.
+    !$acc parallel loop collapse(2) copyin(t) copy(fice, fsnow)
+    do k=1,pver
+       do i=1,ncol
+          if (k < top_lev) then
+             fice(i,k) = 0._kind_phys
+             fsnow(i,k) = 0._kind_phys
+          else
 
 ! Define fractional amount of cloud that is ice
-    do k=top_lev,pver
-       do i=1,ncol
 
 ! If warmer than tmax then water phase
           if (t(i,k) > tmax_fice) then
@@ -87,6 +92,7 @@ contains
              fsnow(i,k) =(tmax_fsnow - t(i,k)) / (tmax_fsnow - tmin_fsnow)
           end if
 
+          end if  ! k >= top_lev
        end do
     end do
 
