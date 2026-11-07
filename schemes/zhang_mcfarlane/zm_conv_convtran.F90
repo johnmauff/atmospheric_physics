@@ -162,16 +162,28 @@ subroutine zm_conv_convtran_run(ncol, pver, &
 ! mbsth is the threshold below which we treat the mass fluxes as zero (in mb/s)
    mbsth = 1.e-15_kind_phys
 
+! The constituent loop stays on the host (constituent metadata calls); each
+! transported constituent runs in one kernel with a thread per gathered
+! column (il1g..il2g) and its vertical passes in their original order, so
+! every value is computed with the same operations as before. Writes
+! through ideep(i) go to distinct columns (ideep is a gather map).
+   !$acc data create(chat, cond, const, fisg, conu, dcondt, dutmp, eutmp, edtmp, dptmp) &
+   !$acc      copyin(q, mu, md, du, eu, ed, dp, dpdry, fracis, jt, mx, ideep) &
+   !$acc      copy(dqdt)
+
 ! Find the highest level top and bottom levels of convection
    ktm = pver
    kbm = pver
+   !$acc parallel loop reduction(min:ktm, kbm)
    do i = il1g, il2g
       ktm = min(ktm,jt(i))
       kbm = min(kbm,mx(i))
    end do
 
 ! Loop ever each constituent
+   !$acc kernels
    dqdt(:,:,:) = 0._kind_phys
+   !$acc end kernels
    do m = 1, ncnst
 
       call const_metadata(m)%standard_name(standard_name)
@@ -182,40 +194,42 @@ subroutine zm_conv_convtran_run(ncol, pver, &
       if (doconvtran(m)) then
 
          call const_metadata(m)%is_dry(is_dry, errflg, errmsg)
-         if (is_dry) then
-            do k = 1,pver
-               do i =il1g,il2g
+
+         !$acc parallel loop gang vector private(k, km1, kp1, kk, kkp1, mupdudp, minc, maxc, &
+         !$acc                                   cdifr, cabv, cbel, fluxin, fluxout, netflux)
+         do i = il1g, il2g
+
+            if (is_dry) then
+               !$acc loop seq
+               do k = 1,pver
                   dptmp(i,k) = dpdry(i,k)
                   dutmp(i,k) = du(i,k)*dp(i,k)/dpdry(i,k)
                   eutmp(i,k) = eu(i,k)*dp(i,k)/dpdry(i,k)
                   edtmp(i,k) = ed(i,k)*dp(i,k)/dpdry(i,k)
                end do
-            end do
-         else
-            do k = 1,pver
-               do i =il1g,il2g
+            else
+               !$acc loop seq
+               do k = 1,pver
                   dptmp(i,k) = dp(i,k)
                   dutmp(i,k) = du(i,k)
                   eutmp(i,k) = eu(i,k)
                   edtmp(i,k) = ed(i,k)
                end do
-            end do
-         endif
+            endif
 
 ! Gather up the constituent and set tend to zero
-         do k = 1,pver
-            do i =il1g,il2g
+            !$acc loop seq
+            do k = 1,pver
                const(i,k) = q(ideep(i),k,m)
                fisg(i,k) = fracis(ideep(i),k,m)
             end do
-         end do
 
 ! From now on work only with gathered data
 
 ! Interpolate environment tracer values to interfaces
-         do k = 1,pver
-            km1 = max(1,k-1)
-            do i = il1g, il2g
+            !$acc loop seq
+            do k = 1,pver
+               km1 = max(1,k-1)
                minc = min(const(i,km1),const(i,k))
                maxc = max(const(i,km1),const(i,k))
                if (minc < 0) then
@@ -243,13 +257,11 @@ subroutine zm_conv_convtran_run(ncol, pver, &
                dcondt(i,k) = 0._kind_phys
 
             end do
-         end do
 
 ! Do levels adjacent to top and bottom
-         k = 2
-         km1 = 1
-         kk = pver
-         do i = il1g,il2g
+            k = 2
+            km1 = 1
+            kk = pver
             mupdudp = mu(i,kk) + dutmp(i,kk)*dptmp(i,kk)
             if (mupdudp > mbsth) then
                conu(i,kk) = (+eutmp(i,kk)*fisg(i,kk)*const(i,kk)*dptmp(i,kk))/mupdudp
@@ -257,36 +269,33 @@ subroutine zm_conv_convtran_run(ncol, pver, &
             if (md(i,k) < -mbsth) then
                cond(i,k) =  (-edtmp(i,km1)*fisg(i,km1)*const(i,km1)*dptmp(i,km1))/md(i,k)
             endif
-         end do
 
 ! Updraft from bottom to top
-         do kk = pver-1,1,-1
-            kkp1 = min(pver,kk+1)
-            do i = il1g,il2g
+            !$acc loop seq
+            do kk = pver-1,1,-1
+               kkp1 = min(pver,kk+1)
                mupdudp = mu(i,kk) + dutmp(i,kk)*dptmp(i,kk)
                if (mupdudp > mbsth) then
                   conu(i,kk) = (  mu(i,kkp1)*conu(i,kkp1)+eutmp(i,kk)*fisg(i,kk)* &
                                   const(i,kk)*dptmp(i,kk) )/mupdudp
                endif
             end do
-         end do
 
 ! Downdraft from top to bottom
-         do k = 3,pver
-            km1 = max(1,k-1)
-            do i = il1g,il2g
+            !$acc loop seq
+            do k = 3,pver
+               km1 = max(1,k-1)
                if (md(i,k) < -mbsth) then
                   cond(i,k) =  (  md(i,km1)*cond(i,km1)-edtmp(i,km1)*fisg(i,km1)*const(i,km1) &
                                   *dptmp(i,km1) )/md(i,k)
                endif
             end do
-         end do
 
 
-         do k = ktm,pver
-            km1 = max(1,k-1)
-            kp1 = min(pver,k+1)
-            do i = il1g,il2g
+            !$acc loop seq
+            do k = ktm,pver
+               km1 = max(1,k-1)
+               kp1 = min(pver,k+1)
 
 ! limit fluxes outside convection to mass in appropriate layer
 ! these limiters are probably only safe for positive definite quantitities
@@ -302,12 +311,11 @@ subroutine zm_conv_convtran_run(ncol, pver, &
                endif
                dcondt(i,k) = netflux/dptmp(i,k)
             end do
-         end do
 ! %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 !
-         do k = kbm,pver
-            km1 = max(1,k-1)
-            do i = il1g,il2g
+            !$acc loop seq
+            do k = kbm,pver
+               km1 = max(1,k-1)
                if (k == mx(i)) then
 
                   fluxin =  mu(i,k)*min(chat(i,k),const(i,km1)) - md(i,k)*cond(i,k)
@@ -322,19 +330,20 @@ subroutine zm_conv_convtran_run(ncol, pver, &
                   dcondt(i,k) = 0._kind_phys
                end if
             end do
-         end do
 
 ! Scatter tendency back to full array
-         do k = 1,pver
-            kp1 = min(pver,k+1)
-            do i = il1g,il2g
+            !$acc loop seq
+            do k = 1,pver
                dqdt(ideep(i),k,m) = dcondt(i,k)
             end do
-         end do
+
+         end do  ! gathered columns
 
       end if      ! for doconvtran
 
    end do
+
+   !$acc end data
 
    return
 end subroutine zm_conv_convtran_run

@@ -149,26 +149,47 @@ subroutine zm_conv_momtran_run(ncol, pver, pverp, &
    errmsg = ''
    errflg = 0
 
+! GPU layout (OpenACC): the local work arrays live on the device only
+! (create); the scheme's arguments use present-or-copy clauses. Each wind
+! component's transport runs in one kernel with a thread per gathered
+! column (il1g..il2g) and its vertical passes in their original order, so
+! every value is computed with the same operations as before. Writes
+! through ideep(i) go to distinct columns (ideep is a gather map).
+   !$acc data create(chat, cond, const, conu, dcondt, mududp, mddudp, pgu, pgd, gseten, &
+   !$acc             winds, wind_tends, pguall, pgdall, icwu, icwd, mflux, wind0, windf) &
+   !$acc      copyin(windu, windv, mu, md, du, eu, ed, dp, jt, mx, ideep) &
+   !$acc      copy(windu_tend, windv_tend, pguallu, pguallv, pgdallu, pgdallv, &
+   !$acc           icwuu, icwuv, icwdu, icwdv, seten)
+
 ! Combine winds in single array
-   winds(:,:,1) = windu(:,:)
-   winds(:,:,2) = windv(:,:)
-
 ! Initialize outgoing fields
-   pguall(:,:,:)     = 0.0_kind_phys
-   pgdall(:,:,:)     = 0.0_kind_phys
 ! Initialize in-cloud winds to environmental wind
-   icwu(:ncol,:,:)       = winds(:ncol,:,:)
-   icwd(:ncol,:,:)       = winds(:ncol,:,:)
-
 ! Initialize momentum flux and  final winds
-   mflux(:,:,:)       = 0.0_kind_phys
-   wind0(:,:,:)         = 0.0_kind_phys
-   windf(:,:,:)         = 0.0_kind_phys
-
 ! Initialize dry static energy
-
-   seten(:,:)         = 0.0_kind_phys
-   gseten(:,:)         = 0.0_kind_phys
+   !$acc parallel loop collapse(2)
+   do k = 1, pver
+      do i = 1, ncol
+         winds(i,k,1) = windu(i,k)
+         winds(i,k,2) = windv(i,k)
+         do m = 1, num_winds
+            pguall(i,k,m) = 0.0_kind_phys
+            pgdall(i,k,m) = 0.0_kind_phys
+            icwu(i,k,m)   = winds(i,k,m)
+            icwd(i,k,m)   = winds(i,k,m)
+            mflux(i,k,m)  = 0.0_kind_phys
+            wind0(i,k,m)  = 0.0_kind_phys
+            windf(i,k,m)  = 0.0_kind_phys
+         end do
+         seten(i,k)  = 0.0_kind_phys
+         gseten(i,k) = 0.0_kind_phys
+      end do
+   end do
+   !$acc parallel loop collapse(2)
+   do m = 1, num_winds
+      do i = 1, ncol
+         mflux(i,pverp,m) = 0.0_kind_phys
+      end do
+   end do
 
 ! mbsth is the threshold below which we treat the mass fluxes as zero (in mb/s)
    mbsth = 1.e-15_kind_phys
@@ -176,6 +197,7 @@ subroutine zm_conv_momtran_run(ncol, pver, pverp, &
 ! Find the highest level top and bottom levels of convection
    ktm = pver
    kbm = pver
+   !$acc parallel loop reduction(min:ktm, kbm)
    do i = il1g, il2g
       ktm = min(ktm,jt(i))
       kbm = min(kbm,mx(i))
@@ -185,22 +207,31 @@ subroutine zm_conv_momtran_run(ncol, pver, pverp, &
    do m = 1, num_winds                    !start at m = 1 to transport momentum
       if (domomtran) then
 
-! Gather up the winds and set tend to zero
-         do k = 1,pver
-            do i =il1g,il2g
-               const(i,k) = winds(ideep(i),k,m)
-                wind0(i,k,m) = const(i,k)
+! Initialize the tendency to zero everywhere (the transport below scatters
+! the gathered columns' tendency into it)
+         !$acc parallel loop collapse(2)
+         do k = 1, pver
+            do i = 1, ncol
+               wind_tends(i,k,m) = 0._kind_phys
             end do
          end do
 
+         !$acc parallel loop gang vector private(k, km1, kp1, kk, kkm1, kkp1, ii, mupdudp)
+         do i = il1g, il2g
+
+! Gather up the winds and set tend to zero
+            !$acc loop seq
+            do k = 1,pver
+               const(i,k) = winds(ideep(i),k,m)
+               wind0(i,k,m) = const(i,k)
+            end do
 
 ! From now on work only with gathered data
 
 ! Interpolate winds to interfaces
-
-         do k = 1,pver
-            km1 = max(1,k-1)
-            do i = il1g, il2g
+            !$acc loop seq
+            do k = 1,pver
+               km1 = max(1,k-1)
 
                ! use arithmetic mean
                chat(i,k) = 0.5_kind_phys* (const(i,k)+const(i,km1))
@@ -211,25 +242,20 @@ subroutine zm_conv_momtran_run(ncol, pver, pverp, &
 
 !              provisional tends
                dcondt(i,k) = 0._kind_phys
-
             end do
-         end do
-
 
 !
 ! Pressure Perturbation Term
 !
 
       !Top boundary:  assume mu is zero
+            pgu(i,1) = 0.0_kind_phys
+            pgd(i,1) = 0.0_kind_phys
 
-         k=1
-         pgu(:il2g,k) = 0.0_kind_phys
-         pgd(:il2g,k) = 0.0_kind_phys
-
-         do k=2,pver-1
-            km1 = max(1,k-1)
-            kp1 = min(pver,k+1)
-            do i = il1g,il2g
+            !$acc loop seq
+            do k=2,pver-1
+               km1 = max(1,k-1)
+               kp1 = min(pver,k+1)
 
                !interior points
 
@@ -238,94 +264,66 @@ subroutine zm_conv_momtran_run(ncol, pver, pverp, &
 
                pgu(i,k) = - momcu * 0.5_kind_phys * mududp(i,k)
 
-
                mddudp(i,k) =  ( md(i,k) * (const(i,k)- const(i,km1))/dp(i,km1) &
                            +  md(i,kp1) * (const(i,kp1) - const(i,k))/dp(i,k))
 
                pgd(i,k) = - momcd * 0.5_kind_phys * mddudp(i,k)
-
-
             end do
-         end do
 
        ! bottom boundary
-       k = pver
-       km1 = max(1,k-1)
-       do i=il1g,il2g
+            k = pver
+            km1 = max(1,k-1)
 
-          mududp(i,k) =   mu(i,k) * (const(i,k)- const(i,km1))/dp(i,km1)
-          pgu(i,k) = - momcu *  mududp(i,k)
+            mududp(i,k) =   mu(i,k) * (const(i,k)- const(i,km1))/dp(i,km1)
+            pgu(i,k) = - momcu *  mududp(i,k)
 
-          mddudp(i,k) =   md(i,k) * (const(i,k)- const(i,km1))/dp(i,km1)
+            mddudp(i,k) =   md(i,k) * (const(i,k)- const(i,km1))/dp(i,km1)
 
-          pgd(i,k) = - momcd * mddudp(i,k)
-
-       end do
-
+            pgd(i,k) = - momcd * mddudp(i,k)
 
 !
 ! In-cloud velocity calculations
 !
 
 ! Do levels adjacent to top and bottom
-         k = 2
-         km1 = 1
-         kk = pver
-         kkm1 = max(1,kk-1)
-         do i = il1g,il2g
+            k = 2
+            km1 = 1
+            kk = pver
+            kkm1 = max(1,kk-1)
             mupdudp = mu(i,kk) + du(i,kk)*dp(i,kk)
             if (mupdudp > mbsth) then
-
                conu(i,kk) = (+eu(i,kk)*const(i,kk)*dp(i,kk)+pgu(i,kk)*dp(i,kk))/mupdudp
             endif
             if (md(i,k) < -mbsth) then
                cond(i,k) =  ((-ed(i,km1)*const(i,km1)*dp(i,km1))-pgd(i,km1)*dp(i,km1))/md(i,k)
             endif
 
-
-         end do
-
-
-
 ! Updraft from bottom to top
-         do kk = pver-1,1,-1
-            kkm1 = max(1,kk-1)
-            kkp1 = min(pver,kk+1)
-            do i = il1g,il2g
+            !$acc loop seq
+            do kk = pver-1,1,-1
+               kkm1 = max(1,kk-1)
+               kkp1 = min(pver,kk+1)
                mupdudp = mu(i,kk) + du(i,kk)*dp(i,kk)
                if (mupdudp > mbsth) then
-
                   conu(i,kk) = (  mu(i,kkp1)*conu(i,kkp1)+eu(i,kk)* &
                                   const(i,kk)*dp(i,kk)+pgu(i,kk)*dp(i,kk))/mupdudp
                endif
             end do
 
-         end do
-
-
 ! Downdraft from top to bottom
-         do k = 3,pver
-            km1 = max(1,k-1)
-            do i = il1g,il2g
+            !$acc loop seq
+            do k = 3,pver
+               km1 = max(1,k-1)
                if (md(i,k) < -mbsth) then
-
                   cond(i,k) =  (  md(i,km1)*cond(i,km1)-ed(i,km1)*const(i,km1) &
                                   *dp(i,km1)-pgd(i,km1)*dp(i,km1) )/md(i,k)
-
                endif
             end do
-         end do
 
-
-         sum = 0._kind_phys
-         sum2 = 0._kind_phys
-
-
-         do k = ktm,pver
-            km1 = max(1,k-1)
-            kp1 = min(pver,k+1)
-            do i = il1g,il2g
-               ii = ideep(i)
+            !$acc loop seq
+            do k = ktm,pver
+               km1 = max(1,k-1)
+               kp1 = min(pver,k+1)
 
 ! version 1 hard to check for roundoff errors
                dcondt(i,k) =  &
@@ -334,32 +332,25 @@ subroutine zm_conv_momtran_run(ncol, pver, pverp, &
                            +md(i,kp1)* (cond(i,kp1)-chat(i,kp1)) &
                            -md(i,k)*   (cond(i,k)-chat(i,k)) &
                           )/dp(i,k)
-
             end do
-         end do
 
   ! dcont for bottom layer
-          !
-          do k = kbm,pver
-             km1 = max(1,k-1)
-             do i = il1g,il2g
-                if (k == mx(i)) then
+            !$acc loop seq
+            do k = kbm,pver
+               if (k == mx(i)) then
 
-                   ! version 1
-                   dcondt(i,k) = (1._kind_phys/dp(i,k))*   &
-                        (-mu(i,k)*(conu(i,k)-chat(i,k)) &
-                        -md(i,k)*(cond(i,k)-chat(i,k)) &
-                        )
-                end if
-             end do
-          end do
+                  ! version 1
+                  dcondt(i,k) = (1._kind_phys/dp(i,k))*   &
+                       (-mu(i,k)*(conu(i,k)-chat(i,k)) &
+                       -md(i,k)*(cond(i,k)-chat(i,k)) &
+                       )
+               end if
+            end do
 
-! Initialize to zero everywhere, then scatter tendency back to full array
-         wind_tends(:,:,m) = 0._kind_phys
-
-         do k = 1,pver
-            do i = il1g,il2g
-               ii = ideep(i)
+! Scatter tendency back to full array
+            ii = ideep(i)
+            !$acc loop seq
+            do k = 1,pver
                wind_tends(ii,k,m) = dcondt(i,k)
     ! Output apparent force on the mean flow from pressure gradient
                pguall(ii,k,m) = -pgu(i,k)
@@ -367,31 +358,23 @@ subroutine zm_conv_momtran_run(ncol, pver, pverp, &
                icwu(ii,k,m)   =  conu(i,k)
                icwd(ii,k,m)   =  cond(i,k)
             end do
-         end do
 
           ! Calculate momentum flux in units of mb*m/s2
-
-          do k = ktm,pver
-             do i = il1g,il2g
-                ii = ideep(i)
-                mflux(i,k,m) = &
-                     -mu(i,k)*   (conu(i,k)-chat(i,k))      &
-                     -md(i,k)*   (cond(i,k)-chat(i,k))
-             end do
-          end do
-
+            !$acc loop seq
+            do k = ktm,pver
+               mflux(i,k,m) = &
+                    -mu(i,k)*   (conu(i,k)-chat(i,k))      &
+                    -md(i,k)*   (cond(i,k)-chat(i,k))
+            end do
 
           ! Calculate winds at the end of the time step
+            !$acc loop seq
+            do k = ktm,pver
+               kp1 = k+1
+               windf(i,k,m) = const(i,k)    -   (mflux(i,kp1,m) - mflux(i,k,m)) * dt /dp(i,k)
+            end do
 
-          do k = ktm,pver
-             do i = il1g,il2g
-                ii = ideep(i)
-                km1 = max(1,k-1)
-                kp1 = k+1
-                windf(i,k,m) = const(i,k)    -   (mflux(i,kp1,m) - mflux(i,k,m)) * dt /dp(i,k)
-
-             end do
-          end do
+         end do  ! gathered columns
 
        end if      ! for domomtran
    end do
@@ -400,12 +383,12 @@ subroutine zm_conv_momtran_run(ncol, pver, pverp, &
     ! Formulation follows from Boville and Bretherton (2003)
     ! formulation by PJR
 
+    !$acc parallel loop collapse(2) &
+    !$acc private(km1, kp1, utop, vtop, ubot, vbot, fket, fkeb, ketend_cons, ketend, gset2)
     do k = ktm,pver
-       km1 = max(1,k-1)
-       kp1 = min(pver,k+1)
        do i = il1g,il2g
-
-          ii = ideep(i)
+          km1 = max(1,k-1)
+          kp1 = min(pver,k+1)
 
           ! calculate the KE fluxes at top and bot of layer
           ! based on a discrete approximation to b&b eq(35) F_KE = u*F_u + v*F_v at interface
@@ -427,31 +410,36 @@ subroutine zm_conv_momtran_run(ncol, pver, pverp, &
           gseten(i,k) = gset2
 
        end do
-
     end do
 
     ! Scatter dry static energy to full array
+    !$acc parallel loop collapse(2) private(ii)
     do k = 1,pver
        do i = il1g,il2g
           ii = ideep(i)
           seten(ii,k) = gseten(i,k)
-
        end do
     end do
 
 ! Split out the wind tendencies
-   windu_tend(:,:) = wind_tends(:,:,1)
-   windv_tend(:,:) = wind_tends(:,:,2)
+   !$acc parallel loop collapse(2)
+   do k = 1, pver
+      do i = 1, ncol
+         windu_tend(i,k) = wind_tends(i,k,1)
+         windv_tend(i,k) = wind_tends(i,k,2)
 
-   pguallu(:,:)     = pguall(:,:,1)
-   pguallv(:,:)     = pguall(:,:,2)
-   pgdallu(:,:)     = pgdall(:,:,1)
-   pgdallv(:,:)     = pgdall(:,:,2)
-   icwuu(:ncol,:)       = icwu(:,:,1)
-   icwuv(:ncol,:)       = icwu(:,:,2)
-   icwdu(:ncol,:)       = icwd(:,:,1)
-   icwdv(:ncol,:)       = icwd(:,:,2)
+         pguallu(i,k)    = pguall(i,k,1)
+         pguallv(i,k)    = pguall(i,k,2)
+         pgdallu(i,k)    = pgdall(i,k,1)
+         pgdallv(i,k)    = pgdall(i,k,2)
+         icwuu(i,k)      = icwu(i,k,1)
+         icwuv(i,k)      = icwu(i,k,2)
+         icwdu(i,k)      = icwd(i,k,1)
+         icwdv(i,k)      = icwd(i,k,2)
+      end do
+   end do
 
+   !$acc end data
    return
 end subroutine zm_conv_momtran_run
 
