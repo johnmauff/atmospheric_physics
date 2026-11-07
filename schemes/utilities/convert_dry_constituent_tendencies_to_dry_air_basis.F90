@@ -42,24 +42,30 @@ contains
 
     ! Local variables
     integer :: i, k, m
-    logical :: const_is_dry
+    logical :: const_is_dry(pcnst)
 
     errmsg = ''
     errflg = 0
 
-    ! Convert the tendencies for the dry constituents to dry air basis
+    ! Which constituents are dry type, on the host: the constituent
+    ! properties (a pointer derived type) never go to the device. An error
+    ! now returns before any tendency is converted (before, constituents
+    ! ahead of the failing one were already converted).
     do m = 1, pcnst
-       ! Check if this constituent is dry type
-       call const_props(m)%is_dry(const_is_dry, errflg, errmsg)
+       call const_props(m)%is_dry(const_is_dry(m), errflg, errmsg)
        if (errflg /= 0) return
-       
-       if (const_is_dry) then
-          do k = 1, pver
-             do i = 1, ncol
+    end do
+
+    ! Convert the tendencies for the dry constituents to dry air basis
+    !$acc parallel loop collapse(3) copyin(const_is_dry, pdel, pdeldry) copy(tend_q)
+    do m = 1, pcnst
+       do k = 1, pver
+          do i = 1, ncol
+             if (const_is_dry(m)) then
                 tend_q(i, k, m) = tend_q(i, k, m) * pdel(i, k) / pdeldry(i, k)
-             end do
+             end if
           end do
-       end if
+       end do
     end do
 
   end subroutine convert_dry_constituent_tendencies_to_dry_air_basis_run
