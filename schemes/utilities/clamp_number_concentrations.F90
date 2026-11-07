@@ -96,10 +96,13 @@ contains
 
     ix_species = [ix_numliq, ix_numrai, ix_numice, ix_numsno]
 
+    ! The constituent arrays are moved once; one kernel per species.
+    !$acc data copy(const_q, const_tend)
     do n = 1, num_species
       ix = ix_species(n)
       if (ix <= 0) cycle
 
+      !$acc parallel loop collapse(2)
       do k = 1, pver
         do i = 1, ncol
           if (const_q(i, k, ix) < qmin) then
@@ -112,6 +115,7 @@ contains
         end do
       end do
     end do
+    !$acc end data
   end subroutine clamp_number_concentrations_run
 
 end module clamp_number_concentrations

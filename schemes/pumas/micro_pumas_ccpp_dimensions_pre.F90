@@ -191,6 +191,10 @@ contains
 
     pumas_timestep = dtime/micro_mg_num_steps
 
+    ! Whole-array copies into the PUMAS arrays: one kernel each; the arrays
+    ! get OpenACC's implicit present-or-copy.
+    !$acc kernels
+
 
 ! Microphysics runs only over levels trop_cloud_top_lev:nlev (the bottom micro_nlev
 ! layers of the top-down indexed column). Slice each host input onto that range, so
@@ -229,6 +233,7 @@ contains
     pumas_frzcnt(:ncol,:) = real(frzcnt_in(:,trop_cloud_top_lev:), pumas_r8)
     pumas_frzdep(:ncol,:) = real(frzdep_in(:,trop_cloud_top_lev:), pumas_r8)
     pumas_frzimm(:ncol,:) = real(frzimm_in(:,trop_cloud_top_lev:), pumas_r8)
+    !$acc end kernels
 
   end subroutine micro_pumas_ccpp_dimensions_pre_run
 

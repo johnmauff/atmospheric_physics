@@ -337,6 +337,11 @@ contains
     errcode = 0
     errmsg = ''
 
+    ! Whole-array copies out of the PUMAS arrays and zeroing above the top
+    ! level: one kernel each; the arrays get OpenACC's implicit
+    ! present-or-copy.
+    !$acc kernels
+
     ! Copy PUMAS outputs (levels 1:micro_nlev) back onto host levels trop_cloud_top_lev:nlev.
     qcsinksum_rate1ord(:,trop_cloud_top_lev:)   = real(pumas_qcsinksum_rate1ord(:ncol,:), kind_phys)
     airT_tend(:,trop_cloud_top_lev:)            = real(pumas_airT_tend(:ncol,:), kind_phys)
@@ -478,6 +483,7 @@ contains
     frac_ice(:,:trop_cloud_top_lev-1)             = 0._kind_phys
     frac_cldliq_tend(:,:trop_cloud_top_lev-1)     = 0._kind_phys
     rain_evap(:,:trop_cloud_top_lev-1)            = 0._kind_phys
+    !$acc end kernels
 
   end subroutine micro_pumas_ccpp_dimensions_post_run
 

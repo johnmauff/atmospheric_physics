@@ -45,6 +45,7 @@ contains
     !lamcrad is an inverse length; it is declared dimensionless in the metadata
     !to match the RRTMGP and host declarations, so dcon must stay in meters for
     !the value handed to radiation to be consistent with CAM.
+    !$acc parallel loop collapse(2) copyin(strat_cldfrc) copy(pgamrad, lamcrad, deffi)
     do k = trop_cloud_top_lev, nlev
        do i = 1, ncol
           if (strat_cldfrc(i, k) < cldfrc_min) then
