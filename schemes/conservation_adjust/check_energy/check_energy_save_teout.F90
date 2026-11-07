@@ -24,13 +24,18 @@ contains
     character(len=512), intent(out)   :: errmsg         ! error message
     integer,            intent(out)   :: errflg         ! error flag
 
+    integer :: i
+
     errmsg = ''
     errflg = 0
 
     ! nb hplin: note that in physpkg.F90, the pbuf is updated to the previous dyn timestep
     ! through itim_old. Need to check if we need to replicate such pbuf functionality
     ! in the CAM-SIMA/CCPP infrastructure.
-    teout(:ncol) = te_cur_dyn(:ncol)
+    !$acc parallel loop copyin(te_cur_dyn) copy(teout)
+    do i = 1, ncol
+      teout(i) = te_cur_dyn(i)
+    end do
 
   end subroutine check_energy_save_teout_run
 

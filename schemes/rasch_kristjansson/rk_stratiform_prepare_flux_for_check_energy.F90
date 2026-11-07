@@ -34,6 +34,8 @@ contains
     character(len=512), intent(out) :: errmsg
     integer,            intent(out) :: errflg
 
+    integer :: i
+
     errmsg = ''
     errflg = 0
 
@@ -42,10 +44,16 @@ contains
 
     ! Water leaving the column as large-scale precipitation,
     ! less the reserved convective liquid that entered it through detrainment
-    flx_cnd(:ncol) = prec_str(:ncol) - rliq(:ncol)
+    !$acc parallel loop copyin(prec_str, rliq) copy(flx_cnd)
+    do i = 1, ncol
+      flx_cnd(i) = prec_str(i) - rliq(i)
+    end do
 
     ! Frozen precipitation represents net ice fluxes through column boundaries
-    flx_ice(:ncol) = snow_str(:ncol)
+    !$acc parallel loop copyin(snow_str) copy(flx_ice)
+    do i = 1, ncol
+      flx_ice(i) = snow_str(i)
+    end do
 
   end subroutine rk_stratiform_prepare_flux_for_check_energy_run
 

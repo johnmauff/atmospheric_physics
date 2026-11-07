@@ -81,29 +81,52 @@ contains
       integer,           intent(out)   :: errflg
 
       ! Local variables
-      integer                          :: i
+      integer                          :: i, k
 
       errmsg = ''
       errflg = 0
 
       ! Sum convective mass flux at interfaces
-      cmfmc_total(:ncol,:pverp) = cmfmc_deep(:ncol,:pverp) + cmfmc_sh(:ncol,:pverp)
+      !$acc data copyin(pmid, cmfmc_deep, rprddp, qc_deep, cnt_deep, cnb_deep, &
+      !$acc              cmfmc_sh, qc_sh, rliq_sh, rprdsh, cnt_sh, cnb_sh) &
+      !$acc      copy(rliq_total, cmfmc_total, rprdtot, qc_total, cnt, cnb, p_cnt, p_cnb)
+
+      !$acc parallel loop collapse(2)
+      do k = 1, pverp
+        do i = 1, ncol
+          cmfmc_total(i,k) = cmfmc_deep(i,k) + cmfmc_sh(i,k)
+        end do
+      end do
 
       ! Sum detrainment of water at midpoints
-      qc_total(:ncol,:pver) = qc_deep(:ncol,:pver) + qc_sh(:ncol,:pver)
+      !$acc parallel loop collapse(2)
+      do k = 1, pver
+        do i = 1, ncol
+          qc_total(i,k) = qc_deep(i,k) + qc_sh(i,k)
+        end do
+      end do
 
       ! Sum vertically-integrated reserved liquid
-      rliq_total(:ncol) = rliq_total(:ncol) + rliq_sh(:ncol)
+      !$acc parallel loop
+      do i = 1, ncol
+        rliq_total(i) = rliq_total(i) + rliq_sh(i)
+      end do
 
       ! Sum RPRDTOT = RPRDSH + RPRDDP
       ! CMFDQR is the shallow convective rainout only. The total is stored in RPRDTOT.
-      rprdtot(:ncol,:pver) = rprdsh(:ncol,:pver) + rprddp(:ncol,:pver)
+      !$acc parallel loop collapse(2)
+      do k = 1, pver
+        do i = 1, ncol
+          rprdtot(i,k) = rprdsh(i,k) + rprddp(i,k)
+        end do
+      end do
 
       ! Merge the shallow and deep convective "cloud top/base" and compute pressures
       ! Note: Indices decrease with height
-      cnt(:ncol) = cnt_deep(:ncol)
-      cnb(:ncol) = cnb_deep(:ncol)
+      !$acc parallel loop
       do i = 1, ncol
+        cnt(i) = cnt_deep(i)
+        cnb(i) = cnb_deep(i)
         ! if shallow cloud top is higher then use shallow cloud top
         if(cnt_sh(i) < cnt(i)) cnt(i) = cnt_sh(i)
 
@@ -125,6 +148,8 @@ contains
         p_cnt(i) = pmid(i, cnt(i))
         p_cnb(i) = pmid(i, cnb(i))
       enddo
+
+      !$acc end data
 
 
   end subroutine convect_shallow_sum_to_deep_run

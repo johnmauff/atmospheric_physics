@@ -47,10 +47,16 @@ contains
 
     ! Combine precipitation and reserved liquid for total liquid+ice flux
     ! This represents net liquid and ice fluxes through column boundaries
-    flx_cnd(:ncol) = prec_dp(:ncol) + rliq(:ncol)
+    !$acc parallel loop copyin(prec_dp, rliq) copy(flx_cnd)
+    do i = 1, ncol
+      flx_cnd(i) = prec_dp(i) + rliq(i)
+    end do
 
     ! Frozen precipitation represents net ice fluxes through column boundaries
-    flx_ice(:ncol) = snow_dp(:ncol)
+    !$acc parallel loop copyin(snow_dp) copy(flx_ice)
+    do i = 1, ncol
+      flx_ice(i) = snow_dp(i)
+    end do
 
   end subroutine zm_prepare_flux_for_check_energy_run
 

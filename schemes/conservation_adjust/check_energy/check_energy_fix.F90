@@ -28,7 +28,7 @@ contains
     integer,            intent(out)   :: errflg         ! error flag
 
     ! Local variables
-    integer :: i
+    integer :: i, k
 
     errmsg = ''
     errflg = 0
@@ -37,9 +37,15 @@ contains
     scheme_name = "check_energy_fix"
 
     ! add (-) global mean total energy difference as heating
-    ptend_s(:ncol, :pver) = heat_glob
+    !$acc parallel loop collapse(2) copy(ptend_s)
+    do k = 1, pver
+      do i = 1, ncol
+        ptend_s(i,k) = heat_glob
+      end do
+    end do
 
     ! compute effective sensible heat flux
+    !$acc parallel loop copyin(pint) copy(eshflx)
     do i = 1, ncol
       eshflx(i) = heat_glob * (pint(i,pver+1) - pint(i,1)) / gravit
     end do
