@@ -158,23 +158,19 @@ contains
 
     ! Define simple_physics_option to either "TJ16" (moist HS) or "RJ12" (simple-physics)
     character(LEN=4)    :: simple_physics_option
+    logical             :: is_tj16  ! simple_physics_option == "TJ16", for the device
 
     ! Initialize certain constants
     T_width    = 26.0_kind_phys*pi/180.0_kind_phys
 
     ! Initialize certain outfields
-    tendency_of_air_enthalpy = 0.0_kind_phys
     scheme_name              = "TJ2016_sfc_pbl_hs"
     errmsg                   = ' '
     errflg                   = 0
 
-    ! Set local copies to not modify model state directly
-    UCopy = U
-    VCopy = V
-    TCopy = stateT
-
     simple_physics_option = "TJ16"   ! Set the simple_physics_option "TJ16" (default, moist HS)
     ! simple_physics_option = "RJ12"   ! alternative simple-physics forcing, Reed and Jablonowski (2012)
+    is_tj16 = simple_physics_option == "TJ16"
 
     ! Determine what direction vertical integration/looping should occur:
     if (index_top_interface < index_surface) then
@@ -183,42 +179,67 @@ contains
        vdir = -1
     end if
 
+    ! Set the exchange coefficient
+    if (is_tj16) then
+        C = 0.0044_kind_phys  ! Surface exchange coefficient for sensible and latent heat for moist HS
+    else                      ! settings for RJ12
+        C = 0.0011_kind_phys  ! Surface exchange coefficient for sensible and latent heat for simple-physics
+    end if
+
+    ! Columns are independent: everything below runs for one column at a
+    ! time, in the order of the original column-by-column computation.
+    !$acc parallel loop gang vector &
+    !$acc   copyin(cappav, rairv, cpairv, zvirv, etamid, clat, PS, pmid, pint, lnpint, &
+    !$acc          rpdel, stateT, U, V) &
+    !$acc   copy(qv) &
+    !$acc   copyout(dudt, dvdt, shflx, lhflx, taux, tauy, evap, dqdt_vdiff, dtdt_vdiff, &
+    !$acc           dtdt_heating, Km, Ke, Tsurf, tendency_of_air_enthalpy) &
+    !$acc   create(cossq, cossqsq, sinsq, coslat, wind, rho, Cd, za, CA, CC, CE, CFt, CFq, &
+    !$acc          CAm, CCm, CEm, CFu, CFv, UCopy, VCopy, TCopy)
+    do i = 1, ncol
+
+    ! Initialize certain outfields
+    do k = 1, pver
+        tendency_of_air_enthalpy(i,k) = 0.0_kind_phys
+    end do
+
+    ! Set local copies to not modify model state directly
+    do k = 1, pver
+        UCopy(i,k) = U(i,k)
+        VCopy(i,k) = V(i,k)
+        TCopy(i,k) = stateT(i,k)
+    end do
+
     !==========================================================================
-    ! Calculate Sea Surface Temperature and set exchange coefficient
+    ! Calculate Sea Surface Temperature
     !==========================================================================
-    if (simple_physics_option == "TJ16") then
-        C=0.0044_kind_phys  ! Surface exchange coefficient for sensible and latent heat for moist HS
-        do i = 1, ncol      ! set SST profile
-            Tsurf(i) = del_T*exp(-(((clat(i))**2.0_kind_phys)/(2.0_kind_phys*(T_width**2.0_kind_phys)))) + T_min
-        end do
-    else                          ! settings for RJ12
-        C     = 0.0011_kind_phys  ! Surface exchange coefficient for sensible and latent heat for simple-physics
-        Tsurf = Tsurf_RJ12        ! constant SST
+    if (is_tj16) then
+        Tsurf(i) = del_T*exp(-(((clat(i))**2.0_kind_phys)/(2.0_kind_phys*(T_width**2.0_kind_phys)))) + T_min
+    else
+        Tsurf(i) = Tsurf_RJ12        ! constant SST
     endif
 
     !==========================================================================
     ! Pre-calculate trig functions
     !==========================================================================
-    do i = 1, ncol
-        coslat (i) = cos(clat(i))
-        sinsq  (i) = sin(clat(i))*sin(clat(i))
-        cossq  (i) = coslat(i)*coslat(i)
-        cossqsq(i) = cossq (i)*cossq (i)
-    end do
+    coslat (i) = cos(clat(i))
+    sinsq  (i) = sin(clat(i))*sin(clat(i))
+    cossq  (i) = coslat(i)*coslat(i)
+    cossqsq(i) = cossq (i)*cossq (i)
 
     !==========================================================================
     ! Initialize accumulated tendencies due to Eddy diffusion
     !==========================================================================
-    dqdt_vdiff = 0.0_kind_phys
-    dtdt_vdiff = 0.0_kind_phys
+    do k = 1, pver
+        dqdt_vdiff(i,k) = 0.0_kind_phys
+        dtdt_vdiff(i,k) = 0.0_kind_phys
+    end do
 
     !==========================================================================
     ! Calculate hydrostatic height za of the lowermost model level
     !==========================================================================
-    do i = 1, ncol
-        dlnpint = (lnpint(i,index_surface_interface) - lnpint(i,index_surface))
-        za(i)   = rairv(i,index_surface)/gravit*stateT(i,index_surface)*(1._kind_phys+zvirv(i,index_surface)*qv(i,index_surface))*0.5_kind_phys*dlnpint
-    end do
+    dlnpint = (lnpint(i,index_surface_interface) - lnpint(i,index_surface))
+    za(i)   = rairv(i,index_surface)/gravit*stateT(i,index_surface)*(1._kind_phys+zvirv(i,index_surface)*qv(i,index_surface))*0.5_kind_phys*dlnpint
 
     !==========================================================================
     ! Simple-physics surface fluxes and turbulence scheme for heat and moisture
@@ -232,42 +253,36 @@ contains
     ! Details of the surface flux and PBL implementation can be found in:
     ! Thatcher and Jablonowski (GMD, 2016) and Reed and Jablonowski (JAMES, 2012).
     !
-    ! Note that the exchange coefficient C is set to a different constant 
+    ! Note that the exchange coefficient C is set to a different constant
     ! in TJ16 and RJ12.
     !==========================================================================
 
     !--------------------------------------------------------------------------
     ! Compute magnitude of the low-level wind, and diffusion coeffients (Ke and Km)
-    ! for PBL turbulence scheme (Eddy diffusivity), 
+    ! for PBL turbulence scheme (Eddy diffusivity),
     ! Ke is used for heat and moisture (used by TJ16 and RJ12)
     ! Km is used for momentum (not used by TJ16, only RJ12)
     !--------------------------------------------------------------------------
-    do i = 1, ncol
-        wind(i) = sqrt(UCopy(i,index_surface)**2 + VCopy(i,index_surface)**2)   ! wind speed closest to the surface
-    end do
-    do i = 1, ncol
-        Ke(i,index_surface_interface) = C*wind(i)*za(i)
-        if (wind(i) < v20) then                 ! if wind speed is less than 20 m/s
-            Cd(i)        = Cd0+Cd1*wind(i)
-            Km(i,index_surface_interface) = Cd(i)*wind(i)*za(i)
-        else
-            Cd(i)        = Cm
-            Km(i,index_surface_interface) = Cm*wind(i)*za(i)
-        end if
-    end do
+    wind(i) = sqrt(UCopy(i,index_surface)**2 + VCopy(i,index_surface)**2)   ! wind speed closest to the surface
+    Ke(i,index_surface_interface) = C*wind(i)*za(i)
+    if (wind(i) < v20) then                 ! if wind speed is less than 20 m/s
+        Cd(i)        = Cd0+Cd1*wind(i)
+        Km(i,index_surface_interface) = Cd(i)*wind(i)*za(i)
+    else
+        Cd(i)        = Cm
+        Km(i,index_surface_interface) = Cm*wind(i)*za(i)
+    end if
 
     do k = 1, pver
-        do i = 1, ncol
-            if( pint(i,k) >= pbltop) then
-                ! keep diffusion coefficients constant below pbltop 
-                Km(i,k) = Km(i,index_surface_interface)
-                Ke(i,k) = Ke(i,index_surface_interface)
-            else
-                ! PBL diffusion coefficients are dragged to zero above pbltop
-                Km(i,k) = Km(i,index_surface_interface)*exp(-(pbltop-pint(i,k))**2/(pblconst)**2)
-                Ke(i,k) = Ke(i,index_surface_interface)*exp(-(pbltop-pint(i,k))**2/(pblconst)**2)
-            end if
-        end do
+        if( pint(i,k) >= pbltop) then
+            ! keep diffusion coefficients constant below pbltop
+            Km(i,k) = Km(i,index_surface_interface)
+            Ke(i,k) = Ke(i,index_surface_interface)
+        else
+            ! PBL diffusion coefficients are dragged to zero above pbltop
+            Km(i,k) = Km(i,index_surface_interface)*exp(-(pbltop-pint(i,k))**2/(pblconst)**2)
+            Ke(i,k) = Ke(i,index_surface_interface)*exp(-(pbltop-pint(i,k))**2/(pblconst)**2)
+        end if
     end do
 
     !--------------------------------------------------------------------------
@@ -275,65 +290,55 @@ contains
     ! and update the variables T and qv
     ! note: this only occurs in the lowermost model level
     !--------------------------------------------------------------------------
-    do i = 1, ncol
-        qsat   = epsilo*e0/PS(i)*exp(-latvap/rh2o*((1._kind_phys/Tsurf(i))-1._kind_phys/T0))        ! saturation value for Q at the surface
-        rho(i) = pmid(i,index_surface)/(rairv(i,index_surface) * stateT(i,index_surface) *(1._kind_phys+zvirv(i,index_surface)*qv(i,index_surface)))  ! air density at the lowest level rho = p/(Rd Tv)
+    qsat   = epsilo*e0/PS(i)*exp(-latvap/rh2o*((1._kind_phys/Tsurf(i))-1._kind_phys/T0))        ! saturation value for Q at the surface
+    rho(i) = pmid(i,index_surface)/(rairv(i,index_surface) * stateT(i,index_surface) *(1._kind_phys+zvirv(i,index_surface)*qv(i,index_surface)))  ! air density at the lowest level rho = p/(Rd Tv)
 
-        tmp                = (stateT(i,index_surface)+C*wind(i)*Tsurf(i)*dtime/za(i))/(1._kind_phys+C*wind(i)*dtime/za(i)) ! new T
-        dtdt_vdiff(i,index_surface) = (tmp-stateT(i,index_surface))/dtime                                    ! T tendency due to surface flux 
-        shflx(i)           = rho(i) * cpairv(i,index_surface) * C*wind(i)*(Tsurf(i)-stateT(i,index_surface)) ! sensible heat flux (W/m2)
-        TCopy(i,index_surface)          = tmp                                                      ! update T
+    tmp                = (stateT(i,index_surface)+C*wind(i)*Tsurf(i)*dtime/za(i))/(1._kind_phys+C*wind(i)*dtime/za(i)) ! new T
+    dtdt_vdiff(i,index_surface) = (tmp-stateT(i,index_surface))/dtime                                    ! T tendency due to surface flux
+    shflx(i)           = rho(i) * cpairv(i,index_surface) * C*wind(i)*(Tsurf(i)-stateT(i,index_surface)) ! sensible heat flux (W/m2)
+    TCopy(i,index_surface)          = tmp                                                      ! update T
 
-        tmp                = (qv(i,index_surface)+C*wind(i)*qsat*dtime/za(i))/(1._kind_phys+C*wind(i)*dtime/za(i)) ! new Q 
-        dqdt_vdiff(i,index_surface) = (tmp-qv(i,index_surface))/dtime                                   ! Q tendency due to surface flux
-        lhflx(i)           = rho(i) * latvap * C*wind(i)*(qsat-qv(i,index_surface))            ! latent heat flux (W/m2)
-        evap(i)            = rho(i) * C*wind(i)*(qsat-qv(i,index_surface))                     ! surface water flux (kg/m2/s)
-        qv(i,index_surface)         = tmp                                                      ! update Q
-    end do
+    tmp                = (qv(i,index_surface)+C*wind(i)*qsat*dtime/za(i))/(1._kind_phys+C*wind(i)*dtime/za(i)) ! new Q
+    dqdt_vdiff(i,index_surface) = (tmp-qv(i,index_surface))/dtime                                   ! Q tendency due to surface flux
+    lhflx(i)           = rho(i) * latvap * C*wind(i)*(qsat-qv(i,index_surface))            ! latent heat flux (W/m2)
+    evap(i)            = rho(i) * C*wind(i)*(qsat-qv(i,index_surface))                     ! surface water flux (kg/m2/s)
+    qv(i,index_surface)         = tmp                                                      ! update Q
 
-    if (simple_physics_option == "RJ12") then
+    if (.not. is_tj16) then
         !--------------------------------------------------------------------------
         ! If the configuration is set to the simple-physics package by RJ12 compute
-        ! surface momentum fluxes using an implicit approach and update the variables u and v 
+        ! surface momentum fluxes using an implicit approach and update the variables u and v
         ! note: this only occurs in the lowermost model level and the density field rho from
-        ! above is used 
+        ! above is used
         !--------------------------------------------------------------------------
-        do i = 1, ncol
-            tmp           = Cd(i) * wind(i)
-            taux(i)       = -rho(i) * tmp * UCopy(i,index_surface)                 ! zonal surface momentum flux (N/m2)
-            UCopy(i,index_surface) = UCopy(i,index_surface)/(1._kind_phys+tmp*dtime/za(i))  ! new U
-            tauy(i)       = -rho(i) * tmp * VCopy(i,index_surface)                 ! meridional surface momentum flux (N/m2)
-            VCopy(i,index_surface) = VCopy(i,index_surface)/(1._kind_phys+tmp*dtime/za(i))  ! new V
-        enddo
+        tmp           = Cd(i) * wind(i)
+        taux(i)       = -rho(i) * tmp * UCopy(i,index_surface)                 ! zonal surface momentum flux (N/m2)
+        UCopy(i,index_surface) = UCopy(i,index_surface)/(1._kind_phys+tmp*dtime/za(i))  ! new U
+        tauy(i)       = -rho(i) * tmp * VCopy(i,index_surface)                 ! meridional surface momentum flux (N/m2)
+        VCopy(i,index_surface) = VCopy(i,index_surface)/(1._kind_phys+tmp*dtime/za(i))  ! new V
     endif
 
     !--------------------------------------------------------------------------
     ! Calculate Diagonal Variables for PBL Scheme (semi-implicit technique follows the CESM PBL implementation)
     !--------------------------------------------------------------------------
     do k = index_top_interface, index_surface-vdir, vdir
-        do i = 1, ncol
-            rho(i)     = (pint(i,k+vdir)/(rairv(i,k)*(TCopy(i,k+vdir)*(1._kind_phys+zvirv(i,index_surface)*qv(i,k+vdir))+TCopy(i,k)*(1._kind_phys+zvirv(i,index_surface)*qv(i,k)))/2.0_kind_phys))
-            CA(i,k)    = rpdel(i,k)*dtime*gravit*gravit*Ke(i,k+vdir)*rho(i)*rho(i)/(pmid(i,k+vdir)-pmid(i,k))
-            CC(i,k+vdir)  = rpdel(i,k+vdir)*dtime*gravit*gravit*Ke(i,k+vdir)*rho(i)*rho(i)/(pmid(i,k+vdir)-pmid(i,k))
-            ! the next two PBL variables are initialized here for the potential use of RJ12 instead of TJ16
-            ! since they need to use the same density field rho
-            CAm(i,k)   = rpdel(i,k)*dtime*gravit*gravit*Km(i,k+vdir)*rho(i)*rho(i)/(pmid(i,k+vdir)-pmid(i,k))
-            CCm(i,k+vdir) = rpdel(i,k+vdir)*dtime*gravit*gravit*Km(i,k+vdir)*rho(i)*rho(i)/(pmid(i,k+vdir)-pmid(i,k))
-        end do
+        rho(i)     = (pint(i,k+vdir)/(rairv(i,k)*(TCopy(i,k+vdir)*(1._kind_phys+zvirv(i,index_surface)*qv(i,k+vdir))+TCopy(i,k)*(1._kind_phys+zvirv(i,index_surface)*qv(i,k)))/2.0_kind_phys))
+        CA(i,k)    = rpdel(i,k)*dtime*gravit*gravit*Ke(i,k+vdir)*rho(i)*rho(i)/(pmid(i,k+vdir)-pmid(i,k))
+        CC(i,k+vdir)  = rpdel(i,k+vdir)*dtime*gravit*gravit*Ke(i,k+vdir)*rho(i)*rho(i)/(pmid(i,k+vdir)-pmid(i,k))
+        ! the next two PBL variables are initialized here for the potential use of RJ12 instead of TJ16
+        ! since they need to use the same density field rho
+        CAm(i,k)   = rpdel(i,k)*dtime*gravit*gravit*Km(i,k+vdir)*rho(i)*rho(i)/(pmid(i,k+vdir)-pmid(i,k))
+        CCm(i,k+vdir) = rpdel(i,k+vdir)*dtime*gravit*gravit*Km(i,k+vdir)*rho(i)*rho(i)/(pmid(i,k+vdir)-pmid(i,k))
     end do
-    do i = 1, ncol
-        CA(i,index_surface)            = 0._kind_phys
-        CC(i,index_top_interface)      = 0._kind_phys
-        CE(i,index_surface_interface)  = 0._kind_phys
-        CFt(i,index_surface_interface) = 0._kind_phys
-        CFq(i,index_surface_interface) = 0._kind_phys
-    end do
-    do i = 1, ncol
-        do k = index_surface, index_top_interface, -1*vdir
-            CE(i,k)  = CC(i,k)/(1._kind_phys+CA(i,k)+CC(i,k)-CA(i,k)*CE(i,k+vdir))
-            CFt(i,k) = ((ps0/pmid(i,k))**cappav(i,k)*TCopy(i,k)+CA(i,k)*CFt(i,k+vdir))/(1._kind_phys+CA(i,k)+CC(i,k)-CA(i,k)*CE(i,k+vdir))
-            CFq(i,k) = (qv(i,k)+CA(i,k)*CFq(i,k+vdir))/(1._kind_phys+CA(i,k)+CC(i,k)-CA(i,k)*CE(i,k+vdir))
-        end do
+    CA(i,index_surface)            = 0._kind_phys
+    CC(i,index_top_interface)      = 0._kind_phys
+    CE(i,index_surface_interface)  = 0._kind_phys
+    CFt(i,index_surface_interface) = 0._kind_phys
+    CFq(i,index_surface_interface) = 0._kind_phys
+    do k = index_surface, index_top_interface, -1*vdir
+        CE(i,k)  = CC(i,k)/(1._kind_phys+CA(i,k)+CC(i,k)-CA(i,k)*CE(i,k+vdir))
+        CFt(i,k) = ((ps0/pmid(i,k))**cappav(i,k)*TCopy(i,k)+CA(i,k)*CFt(i,k+vdir))/(1._kind_phys+CA(i,k)+CC(i,k)-CA(i,k)*CE(i,k+vdir))
+        CFq(i,k) = (qv(i,k)+CA(i,k)*CFq(i,k+vdir))/(1._kind_phys+CA(i,k)+CC(i,k)-CA(i,k)*CE(i,k+vdir))
     end do
 
     !--------------------------------------------------------------------------
@@ -343,31 +348,27 @@ contains
     !---------------------------------------------------------------------
     ! First: calculate the PBL mixing tendencies at the top model level
     !---------------------------------------------------------------------
-    do i = 1, ncol
-        tmp             = CFt(i,index_top_interface)*(pmid(i,index_top_interface)/ps0)**cappav(i,index_top_interface)  ! new T at the model top
-        dtdt_vdiff(i,index_top_interface) = (tmp-TCopy(i,index_top_interface))/dtime                                   ! T tendency due to PBL diffusion (model top)
-        TCopy(i,index_top_interface)      = tmp                                                                        ! update T at the model top
+    tmp             = CFt(i,index_top_interface)*(pmid(i,index_top_interface)/ps0)**cappav(i,index_top_interface)  ! new T at the model top
+    dtdt_vdiff(i,index_top_interface) = (tmp-TCopy(i,index_top_interface))/dtime                                   ! T tendency due to PBL diffusion (model top)
+    TCopy(i,index_top_interface)      = tmp                                                                        ! update T at the model top
 
-        dqdt_vdiff(i,index_top_interface) = (CFq(i,index_top_interface)-qv(i,index_top_interface))/dtime               ! Q tendency due to PBL diffusion (model top)
-        qv(i,index_top_interface)         = CFq(i,index_top_interface)                                                 ! update Q at the model top
-    end do
+    dqdt_vdiff(i,index_top_interface) = (CFq(i,index_top_interface)-qv(i,index_top_interface))/dtime               ! Q tendency due to PBL diffusion (model top)
+    qv(i,index_top_interface)         = CFq(i,index_top_interface)                                                 ! update Q at the model top
 
     !-----------------------------------------
     ! PBL mixing at all other model levels
     !-----------------------------------------
-    do i = 1, ncol
-        do k = index_top_interface+vdir, index_surface
-            tmp             = (CE(i,k)*TCopy(i,k-vdir)*(ps0/pmid(i,k-vdir))**cappav(i,k)+CFt(i,k))*(pmid(i,k)/ps0)**cappav(i,k)  ! new T
-            dtdt_vdiff(i,k) = dtdt_vdiff(i,k) + (tmp-TCopy(i,k))/dtime  ! update the T tendency due to surface fluxes and the PBL diffusion
-            TCopy(i,k)          = tmp                                   ! update T
+    do k = index_top_interface+vdir, index_surface
+        tmp             = (CE(i,k)*TCopy(i,k-vdir)*(ps0/pmid(i,k-vdir))**cappav(i,k)+CFt(i,k))*(pmid(i,k)/ps0)**cappav(i,k)  ! new T
+        dtdt_vdiff(i,k) = dtdt_vdiff(i,k) + (tmp-TCopy(i,k))/dtime  ! update the T tendency due to surface fluxes and the PBL diffusion
+        TCopy(i,k)          = tmp                                   ! update T
 
-            tmp             = CE(i,k)*qv(i,k-vdir)+CFq(i,k)         ! new Q
-            dqdt_vdiff(i,k) = dqdt_vdiff(i,k) + (tmp-qv(i,k))/dtime ! update the Q tendency due to surface fluxes and the PBL diffusion
-            qv(i,k)         = tmp                                   ! update Q
-        end do
+        tmp             = CE(i,k)*qv(i,k-vdir)+CFq(i,k)         ! new Q
+        dqdt_vdiff(i,k) = dqdt_vdiff(i,k) + (tmp-qv(i,k))/dtime ! update the Q tendency due to surface fluxes and the PBL diffusion
+        qv(i,k)         = tmp                                   ! update Q
     end do
 
-    if (simple_physics_option == "TJ16") then
+    if (is_tj16) then
         !==========================================================================
         ! modified HS forcing (see Thatcher and Jablonowski (GMD, 2016))
         !--------------------------------------------------------------------------
@@ -378,7 +379,7 @@ contains
         !   circulation models.
         !   Bulletin of the Amer. Meteor. Soc., vol. 75, pp. 1825-1830
         !
-        ! The modified version uses the redefined parameters: trefc, delta_T  
+        ! The modified version uses the redefined parameters: trefc, delta_T
         !==========================================================================
 
         !--------------------------------------------------------------------------
@@ -386,13 +387,11 @@ contains
         !  level as a diagnostic (surface momentum fluxes)
         !--------------------------------------------------------------------------
         kv  = kf*(etamid(index_surface) - sigmab)/onemsig                                 ! RF coefficient at the lowest level
-        do i = 1, ncol
-            dlnpint = (lnpint(i,index_surface_interface) - lnpint(i,index_surface))
-            za(i)   = rairv(i,index_surface)/gravit*TCopy(i,index_surface)*(1._kind_phys+zvirv(i,index_surface)*qv(i,index_surface))*0.5_kind_phys*dlnpint ! height of lowest full model level
-            rho(i)  = pmid(i,index_surface)/(rairv(i,index_surface) * TCopy(i,index_surface) *(1._kind_phys+zvirv(i,index_surface)*qv(i,index_surface)))            ! air density at the lowest level rho = p/(Rd Tv)
-            taux(i) = -kv * rho(i) * UCopy(i,index_surface) * za(i)                                                         ! U surface momentum flux in N/m2
-            tauy(i) = -kv * rho(i) * VCopy(i,index_surface) * za(i)                                                         ! V surface momentum flux in N/m2
-        end do
+        dlnpint = (lnpint(i,index_surface_interface) - lnpint(i,index_surface))
+        za(i)   = rairv(i,index_surface)/gravit*TCopy(i,index_surface)*(1._kind_phys+zvirv(i,index_surface)*qv(i,index_surface))*0.5_kind_phys*dlnpint ! height of lowest full model level
+        rho(i)  = pmid(i,index_surface)/(rairv(i,index_surface) * TCopy(i,index_surface) *(1._kind_phys+zvirv(i,index_surface)*qv(i,index_surface)))            ! air density at the lowest level rho = p/(Rd Tv)
+        taux(i) = -kv * rho(i) * UCopy(i,index_surface) * za(i)                                                         ! U surface momentum flux in N/m2
+        tauy(i) = -kv * rho(i) * VCopy(i,index_surface) * za(i)                                                         ! V surface momentum flux in N/m2
 
         !--------------------------------------------------------------------------
         ! Apply HS Rayleigh Friction (RF) near the surface (below eta=0.7):
@@ -401,10 +400,8 @@ contains
         do k = index_top_interface, index_surface
             if (etamid(k) > sigmab) then
                 kv  = kf*(etamid(k) - sigmab)/onemsig             ! RF coefficient
-                do i=1,ncol
-                    UCopy(i,k) = UCopy(i,k) -kv*UCopy(i,k)*dtime  ! apply RF to U
-                    VCopy(i,k) = VCopy(i,k) -kv*VCopy(i,k)*dtime  ! apply RF to V
-                end do
+                UCopy(i,k) = UCopy(i,k) -kv*UCopy(i,k)*dtime  ! apply RF to U
+                VCopy(i,k) = VCopy(i,k) -kv*VCopy(i,k)*dtime  ! apply RF to V
             end if
         end do
 
@@ -414,26 +411,22 @@ contains
         !-----------------------------------------------------------------------
         do k = index_top_interface, index_surface
             if (etamid(k) > sigmab) then                                        ! lower atmosphere
-                do i = 1, ncol
-                    kt = ka + (ks - ka)*cossqsq(i)*(etamid(k) - sigmab)/onemsig ! relaxation coefficent varies in the vertical
-                    trefc             = T_max - delta_T*sinsq(i)
-                    trefa             = (trefc - delta_theta*cossq(i)*log((pmid(i,k)/ps0)))*(pmid(i,k)/ps0)**cappav(i,k)
-                    trefa             = max(t00,trefa)                          ! relaxation temperature
-                    dtdt_heating(i,k) = (trefa - TCopy(i,k))*kt                     ! temperature forcing due to relaxation
-                    TCopy(i,k)            = TCopy(i,k) + dtdt_heating(i,k)*dtime        ! update T
-                end do
+                kt = ka + (ks - ka)*cossqsq(i)*(etamid(k) - sigmab)/onemsig ! relaxation coefficent varies in the vertical
+                trefc             = T_max - delta_T*sinsq(i)
+                trefa             = (trefc - delta_theta*cossq(i)*log((pmid(i,k)/ps0)))*(pmid(i,k)/ps0)**cappav(i,k)
+                trefa             = max(t00,trefa)                          ! relaxation temperature
+                dtdt_heating(i,k) = (trefa - TCopy(i,k))*kt                     ! temperature forcing due to relaxation
+                TCopy(i,k)            = TCopy(i,k) + dtdt_heating(i,k)*dtime        ! update T
             else
-                do i=1,ncol
-                    trefc             = T_max - delta_T*sinsq(i)
-                    trefa             = (trefc - delta_theta*cossq(i)*log((pmid(i,k)/ps0)))*(pmid(i,k)/ps0)**cappav(i,k)
-                    trefa             = max(t00,trefa)                          ! relaxation temperature
-                    dtdt_heating(i,k) = (trefa - TCopy(i,k))*ka                     ! temperature forcing due to relaxation
-                    TCopy(i,k)            = TCopy(i,k) + dtdt_heating(i,k)*dtime        ! update T
-                end do
+                trefc             = T_max - delta_T*sinsq(i)
+                trefa             = (trefc - delta_theta*cossq(i)*log((pmid(i,k)/ps0)))*(pmid(i,k)/ps0)**cappav(i,k)
+                trefa             = max(t00,trefa)                          ! relaxation temperature
+                dtdt_heating(i,k) = (trefa - TCopy(i,k))*ka                     ! temperature forcing due to relaxation
+                TCopy(i,k)            = TCopy(i,k) + dtdt_heating(i,k)*dtime        ! update T
             end if
         end do
 
-    else 
+    else
         !==========================================================================
         ! RJ12: Surface flux and PBL forcing of u and v follows the Reed-Jablonowski simple-physics configuration
         !       no HS temperature relaxation is used which limits this configuration to
@@ -444,19 +437,15 @@ contains
         ! Calculate Diagonal Variables for PBL Scheme (semi-implicit technique follows the CESM PBL implementation)
         ! The fields CAm and CCm are also initialized above to guarantee the use of the same density.
         !--------------------------------------------------------------------------
-        do i = 1, ncol
-            CAm(i,index_surface)           = 0._kind_phys
-            CCm(i,index_top_interface)         = 0._kind_phys
-            CEm(i,index_surface_interface) = 0._kind_phys
-            CFu(i,index_surface_interface) = 0._kind_phys
-            CFv(i,index_surface_interface) = 0._kind_phys
-        end do
-        do i = 1, ncol
-            do k = index_surface, index_top_interface, -1*vdir
-                CEm(i,k) = CCm(i,k)/(1._kind_phys+CAm(i,k)+CCm(i,k)-CAm(i,k)*CEm(i,k+vdir))
-                CFu(i,k) = (UCopy(i,k)+CAm(i,k)*CFu(i,k+vdir))/(1._kind_phys+CAm(i,k)+CCm(i,k)-CAm(i,k)*CEm(i,k+vdir))
-                CFv(i,k) = (VCopy(i,k)+CAm(i,k)*CFv(i,k+vdir))/(1._kind_phys+CAm(i,k)+CCm(i,k)-CAm(i,k)*CEm(i,k+vdir))
-            end do
+        CAm(i,index_surface)           = 0._kind_phys
+        CCm(i,index_top_interface)         = 0._kind_phys
+        CEm(i,index_surface_interface) = 0._kind_phys
+        CFu(i,index_surface_interface) = 0._kind_phys
+        CFv(i,index_surface_interface) = 0._kind_phys
+        do k = index_surface, index_top_interface, -1*vdir
+            CEm(i,k) = CCm(i,k)/(1._kind_phys+CAm(i,k)+CCm(i,k)-CAm(i,k)*CEm(i,k+vdir))
+            CFu(i,k) = (UCopy(i,k)+CAm(i,k)*CFu(i,k+vdir))/(1._kind_phys+CAm(i,k)+CCm(i,k)-CAm(i,k)*CEm(i,k+vdir))
+            CFv(i,k) = (VCopy(i,k)+CAm(i,k)*CFv(i,k+vdir))/(1._kind_phys+CAm(i,k)+CCm(i,k)-CAm(i,k)*CEm(i,k+vdir))
         end do
 
         !--------------------------------------------------------------------------
@@ -466,29 +455,25 @@ contains
         !---------------------------------------------------------------------
         ! First: calculate the PBL diffusive tendencies at the top model level
         !---------------------------------------------------------------------
-        do i = 1, ncol
-            UCopy(i,index_top_interface) = CFu(i,index_top_interface)  ! new U at the model top
-            VCopy(i,index_top_interface) = CFv(i,index_top_interface)  ! new V at the model top
-        end do
+        UCopy(i,index_top_interface) = CFu(i,index_top_interface)  ! new U at the model top
+        VCopy(i,index_top_interface) = CFv(i,index_top_interface)  ! new V at the model top
 
         !-----------------------------------------
         ! PBL diffusion of U and V at all other model levels
         !-----------------------------------------
-        do i = 1, ncol
-            do k = index_top_interface+vdir, index_surface
-                UCopy(i,k) = CEm(i,k)*UCopy(i,k-vdir) + CFu(i,k)  ! new U
-                VCopy(i,k) = CEm(i,k)*VCopy(i,k-vdir) + CFv(i,k)  ! new V
-            end do
+        do k = index_top_interface+vdir, index_surface
+            UCopy(i,k) = CEm(i,k)*UCopy(i,k-vdir) + CFu(i,k)  ! new U
+            VCopy(i,k) = CEm(i,k)*VCopy(i,k-vdir) + CFv(i,k)  ! new V
         end do
     endif
 
-    do i = 1, ncol
-        do k = index_top_interface, index_surface
-            dudt(i, k)                    = (UCopy(i, k) - U(i, k)) / dtime
-            dvdt(i, k)                    = (VCopy(i, k) - V(i, k)) / dtime
-            tendency_of_air_enthalpy(i,k) = (TCopy(i,k) - stateT(i,k)) / dtime * cpairv(i,k)
-        end do
+    do k = index_top_interface, index_surface
+        dudt(i, k)                    = (UCopy(i, k) - U(i, k)) / dtime
+        dvdt(i, k)                    = (VCopy(i, k) - V(i, k)) / dtime
+        tendency_of_air_enthalpy(i,k) = (TCopy(i,k) - stateT(i,k)) / dtime * cpairv(i,k)
     end do
+
+    end do  ! i, columns
 
     end subroutine tj2016_sfc_pbl_hs_run
 

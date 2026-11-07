@@ -73,9 +73,6 @@ contains
         errmsg = ' '
         errflg = 0
 
-        precl   = 0.0_kind_phys
-        tendency_of_air_enthalpy    = 0.0_kind_phys
-
         !=========================================================================
         ! Placeholder location for an optional deep convection parameterization (not included here)
         !=========================================================================
@@ -89,9 +86,15 @@ contains
         !=========================================================================
         ! Large-Scale Condensation and Precipitation without cloud stage 
         !=========================================================================
-        localT = T
-        do k = 1, pver
-            do i = 1, ncol
+        ! Columns are independent; the levels of a column are summed in order
+        ! into the precipitation rate.
+        !$acc parallel loop gang vector &
+        !$acc   copyin(rairv, cpairv, pmid, pdel, T) copy(qv) &
+        !$acc   copyout(relhum, precl, tendency_of_air_enthalpy) create(localT)
+        do i = 1, ncol
+            precl(i) = 0.0_kind_phys
+            do k = 1, pver
+                localT(i,k) = T(i,k)
                 qsat = epsilo*e0/pmid(i,k)*exp(-latvap/rh2o*((1._kind_phys/T(i,k))-1._kind_phys/T0)) ! saturation value for Q
                 if (qv(i,k) > qsat) then
                 ! if > 100% relative humidity rain falls out
