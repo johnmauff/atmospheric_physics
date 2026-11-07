@@ -24,6 +24,7 @@ module atmos_phys_pbl_utils
 contains
 
     pure elemental function calc_ideal_gas_rrho(rair, surface_temperature, pmid) result(rrho)
+      !$acc routine seq
         ! air density reciprocal
         ! Taken from https://glossary.ametsoc.org/wiki/Equation_of_state
         ! where \alpha = rrho
@@ -37,6 +38,7 @@ contains
     end function calc_ideal_gas_rrho
 
     pure elemental function calc_friction_velocity(taux, tauy, rrho) result(friction_velocity)
+      !$acc routine seq
         ! https://glossary.ametsoc.org/wiki/Friction_velocity
         ! NOTE: taux,tauy come form the expansion of the Reynolds stress
         !
@@ -55,6 +57,7 @@ contains
     end function calc_friction_velocity
 
     pure elemental function calc_kinematic_heat_flux(shflx, rrho, cpair) result(khfs)
+      !$acc routine seq
         real(kind_phys), intent(in)  :: shflx  ! surface heat flux            [ W m-2       ]
         real(kind_phys), intent(in)  :: rrho   ! 1./bottom level density      [ m3 kg-1     ]
         real(kind_phys), intent(in)  :: cpair  ! specific heat of dry air     [ J kg-1 K-1  ]
@@ -65,6 +68,7 @@ contains
     end function calc_kinematic_heat_flux
 
     pure elemental function calc_kinematic_water_vapor_flux(qflx, rrho) result(kqfs)
+      !$acc routine seq
         real(kind_phys), intent(in)  :: qflx ! water vapor flux                   [ kg m-2 s-1    ]
         real(kind_phys), intent(in)  :: rrho ! 1./bottom level density            [ m3 kg-1       ]
 
@@ -74,6 +78,7 @@ contains
     end function calc_kinematic_water_vapor_flux
 
     pure elemental function calc_kinematic_buoyancy_flux(khfs, zvir, ths, kqfs) result(kbfs)
+      !$acc routine seq
         real(kind_phys), intent(in) :: khfs  ! surface kinematic heat flux          [ m K s-1       ]
         real(kind_phys), intent(in) :: zvir  ! rh2o/rair - 1
         real(kind_phys), intent(in) :: ths   ! potential temperature at surface     [ K             ]
@@ -86,6 +91,7 @@ contains
     end function calc_kinematic_buoyancy_flux
 
     pure elemental function calc_obukhov_length(thvs, ustar, g, karman, kbfs) result(obukhov_length)
+      !$acc routine seq
         ! Stull, Roland B. An Introduction to Boundary Layer Meteorology. Springer Kluwer Academic Publishers, 1988. Print.
         ! DOI: https://doi.org/10.1007/978-94-009-3027-8
         ! Equation 5.7c, page 181
@@ -106,6 +112,7 @@ contains
     end function calc_obukhov_length
 
     pure elemental function calc_virtual_temperature(temperature, specific_humidity, zvir) result(virtual_temperature)
+      !$acc routine seq
         ! Williamson, D., Kiehl, J., Ramanathan, V., Dickinson, R., & Hack, J. (1987).
         ! Description of the NCAR Community Climate Model (CCM1).
         ! University Corporation for Atmospheric Research. https://doi.org/10.5065/D6TB14WH (Original work published 1987)
@@ -124,6 +131,7 @@ contains
                                                        richardson_number,     &
                                                        shear_squared)         &
                                                        result(kvf)
+      !$acc routine seq
         ! Computes exchange coefficients for turbulent flows.
         !
         ! The stable case (Richardson number, Ri>0) is taken from Holtslag and
@@ -152,6 +160,7 @@ contains
                                                                 richardson_number,     &
                                                                 shear_squared)         &
                                                                 result(kvf)
+      !$acc routine seq
         ! same as austausch_atm but only mixing for Ri<0
         ! i.e. no background mixing and mixing for Ri>0
 
@@ -173,6 +182,7 @@ contains
     end function calc_free_atm_eddy_flux_coefficient
 
     pure elemental function unstable_gradient_richardson_stability_parameter(richardson_number) result(modifier)
+      !$acc routine seq
         ! Williamson, D., Kiehl, J., Ramanathan, V., Dickinson, R., & Hack, J. (1987).
         ! Description of the NCAR Community Climate Model (CCM1).
         ! University Corporation for Atmospheric Research. https://doi.org/10.5065/D6TB14WH (Original work published 1987)
@@ -187,6 +197,7 @@ contains
     end function unstable_gradient_richardson_stability_parameter
 
     pure elemental function stable_gradient_richardson_stability_parameter(richardson_number) result(modifier)
+      !$acc routine seq
         ! Holtslag, A. A. M., and Beljaars A. C. M. , 1989: Surface flux parameterization schemes: Developments and experiences at KNMI.
         ! ECMWF Workshop on Parameterization of Fluxes and Land Surface, Reading, United Kingdom, ECMWF, 121–147.
         ! equation 20, page 140
@@ -202,6 +213,7 @@ contains
     end function stable_gradient_richardson_stability_parameter
 
     pure elemental function neutral_exchange_coefficient(mixing_length_squared, shear_squared) result(neutral_k)
+      !$acc routine seq
         ! Williamson, D., Kiehl, J., Ramanathan, V., Dickinson, R., & Hack, J. (1987).
         ! Description of the NCAR Community Climate Model (CCM1).
         ! University Corporation for Atmospheric Research. https://doi.org/10.5065/D6TB14WH (Original work published 1987)
@@ -217,6 +229,7 @@ contains
     end function neutral_exchange_coefficient
 
     pure elemental function calc_brunt_vaisala_frequency_squared(thv1, thv2, z1, z2, g) result(n2)
+      !$acc routine seq
         ! Vallis, G. K. (2006).
         ! Atmospheric and Oceanic Fluid Dynamics.  Cambridge University Press.
         ! https://doi.org/10.1017/CBO9780511790447
@@ -234,6 +247,7 @@ contains
     end function calc_brunt_vaisala_frequency_squared
 
     pure elemental function calc_gradient_richardson_number(thv1, thv2, z1, z2, s2, g) result(ri)
+      !$acc routine seq
         ! https://glossary.ametsoc.org/wiki/gradient-richardson-number/
         !
         ! Also found in:
@@ -254,6 +268,7 @@ contains
     end function calc_gradient_richardson_number
 
     pure elemental function calc_vertical_shear_squared(u1, u2, v1, v2, z1, z2, minimum_velocity_shear_squared) result(s2)
+      !$acc routine seq
         ! Hack, J., Boville, B., Briegleb, B., Kiehl, J., & Williamson, D. (1993).
         ! Description of the NCAR Community Climate Model (CCM2). University Corporation for Atmospheric Research.
         ! https://doi.org/10.5065/D6QZ27XV (Original work published 1993)

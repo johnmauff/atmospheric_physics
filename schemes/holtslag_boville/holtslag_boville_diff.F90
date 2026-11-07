@@ -123,7 +123,8 @@ contains
   ! Original author: B. Stevens, rewrite August 2000
 !> \section arg_table_hb_pbl_independent_coefficients_run Argument Table
 !! \htmlinclude arg_table_hb_pbl_independent_coefficients_run.html
-  pure subroutine hb_pbl_independent_coefficients_run( &
+  ! Not pure: it contains OpenACC compute constructs.
+  subroutine hb_pbl_independent_coefficients_run( &
     ncol, pver, &
     zvir, rair, gravit, &
     t, th, &
@@ -177,25 +178,44 @@ contains
 
     ! Local variables:
     integer :: i, k
+    integer :: ntop, nbot  ! ntop_turb, nbot_turb (module), for the device
 
     errmsg = ''
     errflg = 0
 
+    ntop = ntop_turb
+    nbot = nbot_turb
+
+    !$acc data copyin(t, th, q_wv, z, pmid, u, v, taux, tauy) copy(thv, ustar, rrho, s2, ri)
+
     ! virtual temperature
+    !$acc kernels
     thv(:,:) = 0._kind_phys
-    thv(:ncol,ntop_turb:) = calc_virtual_temperature(th(:ncol,ntop_turb:), q_wv(:ncol,ntop_turb:), zvir)
+    !$acc end kernels
+    !$acc parallel loop collapse(2)
+    do k = ntop, size(thv, 2)
+      do i = 1, ncol
+        thv(i,k) = calc_virtual_temperature(th(i,k), q_wv(i,k), zvir)
+      end do
+    end do
 
     ! Compute ustar, Obukhov length, and kinematic surface fluxes.
-    rrho(:ncol)   = calc_ideal_gas_rrho(rair, t(:ncol,pver), pmid(:ncol,pver))
-    ustar(:ncol)  = calc_friction_velocity(taux(:ncol),tauy(:ncol), rrho(:ncol))
+    !$acc parallel loop
+    do i = 1, ncol
+      rrho(i)  = calc_ideal_gas_rrho(rair, t(i,pver), pmid(i,pver))
+      ustar(i) = calc_friction_velocity(taux(i), tauy(i), rrho(i))
+    end do
 
     ! Initialize output arrays outside of turbulence region to zeroes
+    !$acc kernels
     s2(:,:) = 0._kind_phys
     ri(:,:) = 0._kind_phys
+    !$acc end kernels
 
     ! Compute s^2 (shear squared), n^2 (brunt vaisaila frequency), and ri (Richardson number = n^2/s^2) using virtual temperature
     ! (formerly trbintd)
-    do k = ntop_turb,nbot_turb-1
+    !$acc parallel loop collapse(2)
+    do k = ntop,nbot-1
       do i = 1,ncol
         s2(i,k) = calc_vertical_shear_squared(u(i,k), u(i,k+1), &
                                               v(i,k), v(i,k+1), &
@@ -206,6 +226,8 @@ contains
                                                   s2(i,k),  gravit)
       end do
     end do
+
+    !$acc end data
   end subroutine hb_pbl_independent_coefficients_run
 
   ! Compute time-dependent, PBL height-dependent variables
@@ -226,7 +248,8 @@ contains
   ! Original author: B. Stevens, August 2000, extracted from pbldiff
 !> \section arg_table_hb_pbl_dependent_coefficients_run Argument Table
 !! \htmlinclude arg_table_hb_pbl_dependent_coefficients_run.html
-  pure subroutine hb_pbl_dependent_coefficients_run( &
+  ! Not pure: it contains OpenACC compute constructs.
+  subroutine hb_pbl_dependent_coefficients_run( &
     ncol, pver, pverp, &
     gravit, &
     z, zi, &
@@ -270,6 +293,8 @@ contains
     real(kind_phys) :: tlv(ncol)       ! ref. level potential tmp + tmp excess
 
     logical  :: check(ncol)            ! false if Richardson number > critical
+    integer  :: npbl_loc               ! npbl (module), for the device
+    real(kind_phys) :: z2(2), rino2(2) ! z(i,k:k+1), rino(i,k:k+1) (a contiguous copy on the device)
 
     ! Local parameters
     real(kind_phys), parameter :: tiny = 1.e-36_kind_phys   ! lower bound for wind magnitude
@@ -278,17 +303,25 @@ contains
     errmsg = ''
     errflg = 0
 
-    ! Compute Obukhov length virtual temperature flux and various arrays for use later:
+    npbl_loc = npbl
+
+    ! One thread per column: each column scans its levels in the original
+    ! order (the level loops below were each a loop over columns inside a
+    ! loop over levels; columns are independent, so the values are the same).
+    !$acc parallel loop gang vector private(k, scaled_phiminv, z2, rino2) &
+    !$acc   copyin(z, zi, u, v, cldn, thv, ustar, kbfs, obklen) copy(pblh, wstar, bge) &
+    !$acc   create(rino, tlv, check)
     do i=1,ncol
+
+       ! Compute Obukhov length virtual temperature flux and various arrays for use later:
        check(i)     = .true.
        rino(i,pver) = 0.0_kind_phys
        pblh(i)      = z(i,pver)
-    end do
 
-    ! PBL height calculation:  Scan upward until the Richardson number between
-    ! the first level and the current level exceeds the "critical" value.
-    do k=pver-1,pver-npbl+1,-1
-       do i=1,ncol
+       ! PBL height calculation:  Scan upward until the Richardson number between
+       ! the first level and the current level exceeds the "critical" value.
+       !$acc loop seq
+       do k=pver-1,pver-npbl_loc+1,-1
           if (check(i)) then
              rino(i,k) = calc_bulk_richardson_number_at_height(u(i,k), u(i,pver), &
                                                                v(i,k), v(i,pver), &
@@ -297,80 +330,79 @@ contains
              ! Modified for boundary layer height diagnosis: Bert Holtslag, June 1994
              ! (Use ricr = 0.3 in this formulation)
              if (rino(i,k) >= ricr) then
-                pblh(i) = linear_interpolate_pbl_height_wrt_richardson(z(i,k:k+1), rino(i,k:k+1))
+                z2(1) = z(i,k)
+                z2(2) = z(i,k+1)
+                rino2(1) = rino(i,k)
+                rino2(2) = rino(i,k+1)
+                pblh(i) = linear_interpolate_pbl_height_wrt_richardson(z2, rino2)
                 check(i) = .false.
              end if
           end if
        end do
-    end do
 
-    ! Estimate an effective surface temperature to account for surface fluctuations
-    do i=1,ncol
-       if (check(i)) pblh(i) = z(i,pverp-npbl)
+       ! Estimate an effective surface temperature to account for surface fluctuations
+       if (check(i)) pblh(i) = z(i,pverp-npbl_loc)
        check(i)  = (kbfs(i) > 0._kind_phys)
        if (check(i)) then
           scaled_phiminv = comp_unstable_scaled_phiminv(pblh(i), obklen(i))
           rino(i,pver)   = 0.0_kind_phys
           tlv(i)         = compute_appropriate_temperature_at_z(thv(i,pver), kbfs(i), ustar(i), scaled_phiminv)
        end if
-    end do
 
-    ! Improve pblh estimate for unstable conditions using the convective temperature excess:
-    do i = 1,ncol
-      bge(i) = 1.e-8_kind_phys
-    end do
+       ! Improve pblh estimate for unstable conditions using the convective temperature excess:
+       bge(i) = 1.e-8_kind_phys
 
-    do k=pver-1,pver-npbl+1,-1
-      do i=1,ncol
-        if (check(i)) then
-          rino(i,k) = calc_modified_bulk_richardson_number_at_height(u(i,k), u(i,pver), &
-                                                                     v(i,k), v(i,pver), &
-                                                                     z(i,k), z(i,pver), &
-                                                                     thv(i,k), thv(i,pver), tlv(i), ustar(i), gravit)
+       !$acc loop seq
+       do k=pver-1,pver-npbl_loc+1,-1
+         if (check(i)) then
+           rino(i,k) = calc_modified_bulk_richardson_number_at_height(u(i,k), u(i,pver), &
+                                                                      v(i,k), v(i,pver), &
+                                                                      z(i,k), z(i,pver), &
+                                                                      thv(i,k), thv(i,pver), tlv(i), ustar(i), gravit)
 
-          if (rino(i,k) >= ricr) then
-            pblh(i) = linear_interpolate_pbl_height_wrt_richardson(z(i,k:k+1), rino(i,k:k+1))
+           if (rino(i,k) >= ricr) then
+             z2(1) = z(i,k)
+             z2(2) = z(i,k+1)
+             rino2(1) = rino(i,k)
+             rino2(2) = rino(i,k+1)
+             pblh(i) = linear_interpolate_pbl_height_wrt_richardson(z2, rino2)
 
-            bge(i) = 2._kind_phys*gravit/(thv(i,k)+thv(i,k+1))*(thv(i,k)-thv(i,k+1))/(z(i,k)-z(i,k+1))*pblh(i)
-            if (bge(i).lt.0._kind_phys) then
-              bge(i) = 1.e-8_kind_phys
-            endif
-            check(i) = .false.
-          end if
-        end if
-      end do
-    end do
+             bge(i) = 2._kind_phys*gravit/(thv(i,k)+thv(i,k+1))*(thv(i,k)-thv(i,k+1))/(z(i,k)-z(i,k+1))*pblh(i)
+             if (bge(i).lt.0._kind_phys) then
+               bge(i) = 1.e-8_kind_phys
+             endif
+             check(i) = .false.
+           end if
+         end if
+       end do
 
-    ! PBL height must be greater than some minimum mechanical mixing depth
-    ! Several investigators have proposed minimum mechanical mixing depth
-    ! relationships as a function of the local friction velocity, u*.  We
-    ! make use of a linear relationship of the form h = c u* where c=700.
-    ! The scaling arguments that give rise to this relationship most often
-    ! represent the coefficient c as some constant over the local coriolis
-    ! parameter.  Here we make use of the experimental results of Koracin
-    ! and Berkowicz (1988) [BLM, Vol 43]: https://doi.org/10.1007/BF00153969
-    ! for wich they recommend 0.07/f
-    ! where f was evaluated at 39.5 N and 52 N.  Thus we use a typical mid
-    ! latitude value for f so that c = 0.07/f = 700. Also, do not allow
-    ! PBL to exceed some maximum (npbl) number of allowable points
-    do i=1,ncol
-       if (check(i)) pblh(i) = z(i,pverp-npbl)
+       ! PBL height must be greater than some minimum mechanical mixing depth
+       ! Several investigators have proposed minimum mechanical mixing depth
+       ! relationships as a function of the local friction velocity, u*.  We
+       ! make use of a linear relationship of the form h = c u* where c=700.
+       ! The scaling arguments that give rise to this relationship most often
+       ! represent the coefficient c as some constant over the local coriolis
+       ! parameter.  Here we make use of the experimental results of Koracin
+       ! and Berkowicz (1988) [BLM, Vol 43]: https://doi.org/10.1007/BF00153969
+       ! for wich they recommend 0.07/f
+       ! where f was evaluated at 39.5 N and 52 N.  Thus we use a typical mid
+       ! latitude value for f so that c = 0.07/f = 700. Also, do not allow
+       ! PBL to exceed some maximum (npbl) number of allowable points
+       if (check(i)) pblh(i) = z(i,pverp-npbl_loc)
        pblh(i)  = max(pblh(i),700.0_kind_phys*ustar(i))
        wstar(i) = comp_wstar( max(0._kind_phys, kbfs(i)), pblh(i), thv(i,pver), gravit)
-    end do
 
-    ! Final requirement on PBL height is that it must be greater than the depth
-    ! of the lowest model level over ocean if there is any cloud diagnosed in
-    ! the lowest model level.  This is to deal with the inadequacies of the
-    ! current "dry" formulation of the boundary layer, where this test is
-    ! used to identify circumstances where there is marine stratus in the
-    ! lowest level, and to provide a weak ventilation of the layer to avoid
-    ! a pathology in the cloud scheme (locking in low-level stratiform cloud)
-    ! If over an ocean surface, and any cloud is diagnosed in the
-    ! lowest level, set pblh to 50 meters higher than top interface of lowest level
-    !
-    !  jrm This is being applied everywhere (not just ocean)!
-    do i=1,ncol
+       ! Final requirement on PBL height is that it must be greater than the depth
+       ! of the lowest model level over ocean if there is any cloud diagnosed in
+       ! the lowest model level.  This is to deal with the inadequacies of the
+       ! current "dry" formulation of the boundary layer, where this test is
+       ! used to identify circumstances where there is marine stratus in the
+       ! lowest level, and to provide a weak ventilation of the layer to avoid
+       ! a pathology in the cloud scheme (locking in low-level stratiform cloud)
+       ! If over an ocean surface, and any cloud is diagnosed in the
+       ! lowest level, set pblh to 50 meters higher than top interface of lowest level
+       !
+       !  jrm This is being applied everywhere (not just ocean)!
        if (cldn(i,pver) >= 0.0_kind_phys) then
          pblh(i) = max(pblh(i),zi(i,pver) + 50._kind_phys)
        end if
@@ -401,7 +433,8 @@ contains
   ! Original authors: B. Boville, B. Stevens, rewrite August 2000
 !> \section arg_table_hb_diff_exchange_coefficients_run Argument Table
 !! \htmlinclude arg_table_hb_diff_exchange_coefficients_run.html
-  pure subroutine hb_diff_exchange_coefficients_run( &
+  ! Not pure: it contains OpenACC compute constructs.
+  subroutine hb_diff_exchange_coefficients_run( &
     ncol, pver, pverp, &
     karman, cpair, &
     z, &
@@ -478,23 +511,41 @@ contains
 
     logical         :: unstable(ncol)       ! points with unstable pbl (positive virtual heat flux) [count]
 
+    ! Module settings, for the device
+    real(kind_phys) :: ml2_loc, ccon_loc
+    integer         :: npbl_loc, ntop, nbot
+
     errmsg = ''
     errflg = 0
 
+    ml2_loc  = ml2
+    ccon_loc = ccon
+    npbl_loc = npbl
+    ntop     = ntop_turb
+    nbot     = nbot_turb
+
+    !$acc data copyin(z, khfs, kqfs, kbfs, ustar, obklen, s2, ri, pblh, wstar, bge) &
+    !$acc      copy(kvm, kvh, kvq, cgh, cgs, tpert, qpert, tke) &
+    !$acc      create(kvf, ktopbl, scaled_phiminv, scaled_phihinv, wm, fak1, fak2, &
+    !$acc             prandtl_factor, unstable)
+
     ! Get atmosphere exchange coefficients
+    !$acc kernels
     kvf(:ncol,:) = 0.0_kind_phys
-    do k = ntop_turb+1, nbot_turb-1
+    !$acc end kernels
+    !$acc parallel loop collapse(2)
+    do k = ntop+1, nbot-1
        do i = 1, ncol
-          kvf(i,k+1) = max(calc_eddy_flux_coefficient(ml2, ri(i, k), s2(i, k)), &
+          kvf(i,k+1) = max(calc_eddy_flux_coefficient(ml2_loc, ri(i, k), s2(i, k)), &
                            minimum_eddy_flux_coefficient)
        end do
     end do
-    kvf(:ncol,ntop_turb+1) = minimum_eddy_flux_coefficient
+    !$acc kernels
+    kvf(:ncol,ntop+1) = minimum_eddy_flux_coefficient
 
     ! Compute PBL exchange coefficients (formerly austausch_pbl)
     kvm = 0._kind_phys
     kvh = 0._kind_phys
-    kve = 0._kind_phys
     cgh = 0._kind_phys
     cgs = 0._kind_phys
     tpert = 0._kind_phys
@@ -503,8 +554,11 @@ contains
 
     ! Mark columns with positive virtual heat flux:
     unstable = (kbfs > 0._kind_phys)
+    !$acc end kernels
+    kve = 0._kind_phys
 
     ! Initialize height independent arrays
+    !$acc parallel loop
     do i=1,ncol
       fak1(i) = ustar(i)*pblh(i)*karman
       if (unstable(i)) then
@@ -522,6 +576,7 @@ contains
     end do
 
     ! Initialize output arrays with free atmosphere values
+    !$acc parallel loop collapse(2)
     do k=1, pverp
        do i=1, ncol
           kvm(i,k) = kvf(i,k)
@@ -533,8 +588,12 @@ contains
     ! only calculated at points determined to be in the interior of the pbl (z(i,k) < pblh(i))
     ! and then calculations are directed toward regime: stable vs unstable, surface vs outer
     ! layer.
-    do k = pver, pver-npbl+2, -1
-      do i = 1, ncol
+    ! One thread per column, levels in their original (downward) order:
+    ! ktopbl(i) is the last level found inside the PBL.
+    !$acc parallel loop gang vector private(k, zmzp, zh, zzh, phiminv, pblk, pr)
+    do i = 1, ncol
+      !$acc loop seq
+      do k = pver, pver-npbl_loc+2, -1
         if (z(i,k) < pblh(i)) then
           zmzp    = 0.5_kind_phys*(z(i,k) + z(i,k-1)) ! we think this is an approximation to the interface height (where KVs are calculated)
           zh      = zmzp/pblh(i)
@@ -549,7 +608,7 @@ contains
               pr       = phiminv/comp_unstable_phihinv(zmzp, obklen(i))
             else
               pblk     = fak2(i)*zzh
-              pr       = scaled_phiminv(i)/scaled_phihinv(i) + ccon*prandtl_factor(i)/fak
+              pr       = scaled_phiminv(i)/scaled_phihinv(i) + ccon_loc*prandtl_factor(i)/fak
               cgs(i,k) = prandtl_factor(i)/(pblh(i)*wm(i))
               cgh(i,k) = khfs(i)*cgs(i,k)*cpair
             end if
@@ -567,6 +626,7 @@ contains
     ! Check whether last allowed midpoint is within PBL
     if(is_hbr_pbl_scheme) then
       ! apply new diffusivity at entrainment zone
+      !$acc parallel loop private(k, kve)
       do i = 1,ncol
         if (bge(i) > 1.e-7_kind_phys) then
           k = ktopbl(i)
@@ -578,7 +638,8 @@ contains
     end if
 
     ! Crude estimate of tke (tke=0 above boundary layer)
-    do k = max(pverp-npbl,2),pverp
+    !$acc parallel loop collapse(2)
+    do k = max(pverp-npbl_loc,2),pverp
       do i = 1, ncol
         if (z(i,k-1) < pblh(i)) then
           tke(i,k) = (kvm(i,k) / pblh(i))**2
@@ -587,7 +648,11 @@ contains
     end do
 
     ! Finalize
+    !$acc kernels
     kvq(:ncol,:) = kvh(:ncol,:)
+    !$acc end kernels
+
+    !$acc end data
   end subroutine hb_diff_exchange_coefficients_run
 
   ! A version of hb_diff_exchange_coefficients
@@ -673,6 +738,7 @@ contains
 
   ! Utility pure elemental functions used in computation
   pure elemental function comp_wstar(kbfs, pblh, thv, gravity) result(wstar)
+    !$acc routine seq
     ! Hack, J., Boville, B., Briegleb, B., Kiehl, J., & Williamson, D. (1993).
     ! Description of the NCAR Community Climate Model (CCM2). University Corporation for Atmospheric Research.
     ! https://doi.org/10.5065/D6QZ27XV (Original work published 1993)
@@ -687,6 +753,7 @@ contains
   end function comp_wstar
 
   pure elemental function calc_modified_bulk_richardson_number_at_height(uh, us, vh, vs, h, zs, thvh, thvs, tlv, ustar, g) result(rih)
+    !$acc routine seq
     ! Modified version of base richardson number equation that incorporates reference level potential temperature
     real(kind_phys), intent(in) :: uh, us, vh, vs, h, zs, thvh, thvs, tlv, ustar, g
     real(kind_phys) :: rih
@@ -698,6 +765,7 @@ contains
   end function calc_modified_bulk_richardson_number_at_height
 
   pure elemental function calc_bulk_richardson_number_at_height(uh, us, vh, vs, h, zs, thvh, thvs, ustar, g) result(rih)
+    !$acc routine seq
     ! Vogelezang, D.H.P., Holtslag, A.A.M. Evaluation and model impacts of alternative
     ! boundary-layer height formulations. Boundary-Layer Meteorol 81, 245–269 (1996).
     ! https://doi.org/10.1007/BF02430331
@@ -712,6 +780,7 @@ contains
   end function calc_bulk_richardson_number_at_height
 
   pure function linear_interpolate_pbl_height_wrt_richardson(z, rino) result(pblh)
+    !$acc routine seq
     real(kind_phys), intent(in) :: z(2)
     real(kind_phys), intent(in) :: rino(2)
     real(kind_phys)             :: pblh
@@ -720,6 +789,7 @@ contains
   end function linear_interpolate_pbl_height_wrt_richardson
 
   pure elemental function compute_appropriate_temperature_at_z(thv, kbfs, ustar, phiminv) result(tlv)
+    !$acc routine seq
     ! Holtslag, A.A.M., Van Meijgaard, E. & De Rooy, W.C. A comparison of boundary layer diffusion
     ! schemes in unstable conditions over land. Boundary-Layer Meteorol 76, 69–95 (1995).
     ! https://doi.org/10.1007/BF00710891
@@ -735,6 +805,7 @@ contains
   end function compute_appropriate_temperature_at_z
 
   pure elemental function comp_stable_phih(z, L) result(phih)
+    !$acc routine seq
     ! Hack, J., Boville, B., Briegleb, B., Kiehl, J., & Williamson, D. (1993).
     ! Description of the NCAR Community Climate Model (CCM2). University Corporation for Atmospheric Research.
     ! https://doi.org/10.5065/D6QZ27XV (Original work published 1993)
@@ -753,6 +824,7 @@ contains
   end function comp_stable_phih
 
   pure elemental function comp_unstable_phiminv(z, L) result(phiminv)
+    !$acc routine seq
     ! Hack, J., Boville, B., Briegleb, B., Kiehl, J., & Williamson, D. (1993).
     ! Description of the NCAR Community Climate Model (CCM2). University Corporation for Atmospheric Research.
     ! https://doi.org/10.5065/D6QZ27XV (Original work published 1993)
@@ -765,6 +837,7 @@ contains
   end function comp_unstable_phiminv
 
   pure elemental function comp_unstable_scaled_phiminv(z, L) result(phiminv)
+    !$acc routine seq
     ! Modified version of:
     ! Hack, J., Boville, B., Briegleb, B., Kiehl, J., & Williamson, D. (1993).
     ! Description of the NCAR Community Climate Model (CCM2). University Corporation for Atmospheric Research.
@@ -780,6 +853,7 @@ contains
   end function comp_unstable_scaled_phiminv
 
   pure elemental function comp_unstable_phihinv(z, L) result(phiminv)
+    !$acc routine seq
     ! Hack, J., Boville, B., Briegleb, B., Kiehl, J., & Williamson, D. (1993).
     ! Description of the NCAR Community Climate Model (CCM2). University Corporation for Atmospheric Research.
     ! https://doi.org/10.5065/D6QZ27XV (Original work published 1993)
@@ -792,6 +866,7 @@ contains
   end function comp_unstable_phihinv
 
   pure elemental function comp_unstable_scaled_phihinv(z, L) result(scaled_phihinv)
+    !$acc routine seq
     ! Modified version of:
     ! Hack, J., Boville, B., Briegleb, B., Kiehl, J., & Williamson, D. (1993).
     ! Description of the NCAR Community Climate Model (CCM2). University Corporation for Atmospheric Research.
