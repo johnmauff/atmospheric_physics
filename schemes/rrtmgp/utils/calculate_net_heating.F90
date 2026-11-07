@@ -55,9 +55,12 @@ subroutine calculate_net_heating_run(ncol, qrl_prime, qrs_prime,  &
    errflg = 0
 
    if (.not. is_offline_dyn) then
+      !$acc kernels copyin(qrs_prime, qrl_prime) copy(rad_heat)
       rad_heat(:,:) = (qrs_prime(:,:) + qrl_prime(:,:))
+      !$acc end kernels
    end if
 
+   !$acc parallel loop copyin(fsnt, fsns, flnt, flns) copy(net_flx)
    do idx = 1, ncol
       net_flx(idx) = fsnt(idx) - fsns(idx) - flnt(idx) + flns(idx)
    end do

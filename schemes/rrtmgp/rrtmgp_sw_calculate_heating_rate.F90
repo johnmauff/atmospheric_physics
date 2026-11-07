@@ -18,21 +18,28 @@ CONTAINS
       character(len=*),   intent(out) :: errmsg
       integer,            intent(out) :: errflg
 
-      integer :: k
+      integer :: i, k
 
       ! Set error variables
       errmsg = ''
       errflg = 0
 
+      !$acc data copyin(rpdel, flux_net, flux_net_clrsky) copy(hrate, hrate_clrsky)
+      !$acc kernels
       hrate = 0.0_kind_phys
+      !$acc end kernels
 
+      !$acc parallel loop collapse(2)
       do k = ktopcam, pver
-         ! top - bottom
-         hrate(:,k) = (flux_net(:,k) - flux_net(:,k+1)) * &
-                 gravit * rpdel(:,k)
-         hrate_clrsky(:,k) = (flux_net_clrsky(:,k) - flux_net_clrsky(:,k+1)) * &
-                 gravit * rpdel(:,k)
+         do i = 1, size(hrate, 1)
+            ! top - bottom
+            hrate(i,k) = (flux_net(i,k) - flux_net(i,k+1)) * &
+                    gravit * rpdel(i,k)
+            hrate_clrsky(i,k) = (flux_net_clrsky(i,k) - flux_net_clrsky(i,k+1)) * &
+                    gravit * rpdel(i,k)
+         end do
       end do
+      !$acc end data
 
    end subroutine rrtmgp_sw_calculate_heating_rate_run
 

@@ -143,11 +143,16 @@ contains
        ! Local variables
        integer :: gas_idx
        integer :: const_idx
+       integer :: i, k
 
        errflg = 0
        errmsg = ''
 
+       ! The constituent lookups stay on the host; the copies run on the device.
+       !$acc data copyin(const_array) copy(rad_const_array)
+       !$acc kernels
        rad_const_array = 0._kind_phys
+       !$acc end kernels
 
        do gas_idx = 1, size(gaslist)
           ! Find the index of the current gas in the constituents array
@@ -157,12 +162,18 @@ contains
              call ccpp_constituent_index(trim(gaslist(gas_idx)), const_idx, errflg, errmsg)
           end if
           if (errflg /= 0) then
-             return
+             exit  ! leave the data region before returning
           end if
           if (const_idx /= int_unassigned) then
-             rad_const_array(:,:,gas_idx) = const_array(:,:,const_idx)
+             !$acc parallel loop collapse(2)
+             do k = 1, size(rad_const_array, 2)
+                do i = 1, size(rad_const_array, 1)
+                   rad_const_array(i,k,gas_idx) = const_array(i,k,const_idx)
+                end do
+             end do
           end if
        end do
+       !$acc end data
 
    end subroutine rrtmgp_constituents_run
 
