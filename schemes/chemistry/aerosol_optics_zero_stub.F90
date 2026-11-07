@@ -14,7 +14,8 @@ contains
 !> \section arg_table_aerosol_optics_zero_stub_run Argument Table
 !! \htmlinclude aerosol_optics_zero_stub_run.html
 !!
-  pure subroutine aerosol_optics_zero_stub_run( &
+  ! Not pure: it contains an OpenACC compute construct.
+  subroutine aerosol_optics_zero_stub_run( &
     aer_tau, aer_tau_w, aer_tau_w_g, aer_lw_abs, &
     errmsg, errflg)
 
@@ -30,10 +31,12 @@ contains
     errmsg = ''
     errflg = 0
 
+    !$acc kernels copy(aer_tau, aer_tau_w, aer_tau_w_g, aer_lw_abs)
     aer_tau(:,:,:)     = 0._kind_phys
     aer_tau_w(:,:,:)   = 0._kind_phys
     aer_tau_w_g(:,:,:) = 0._kind_phys
     aer_lw_abs(:,:,:)  = 0._kind_phys
+    !$acc end kernels
 
   end subroutine aerosol_optics_zero_stub_run
 

@@ -104,7 +104,19 @@ subroutine set_surface_coupling_vars_run(ncol, pver, ncnst, gravit, rair, phis, 
    errmsg  = ''
    errcode = 0
 
+   ! The CO2 index lookup (host) comes first, so that its error return is
+   ! taken after the same outputs are set as before, outside the data region.
+   call ccpp_constituent_index('CO2', co2_idx, errcode, errmsg)
+
+   !$acc data copyin(phis, surf_pres, air_temp, inv_ps_exner, zm, rho, uwnd, vwnd, &
+   !$acc             air_pres, cnst_array, prec_dp, snow_dp, prec_sh, snow_sh, &
+   !$acc             prec_str, snow_str) &
+   !$acc      copy(air_temp_bot, pot_temp_bot, zm_bot, rho_bot, uwnd_bot, vwnd_bot, &
+   !$acc           air_pres_bot, topo_height, sea_lev_pres, cnst_bot, conv_prec, &
+   !$acc           conv_snow, strat_prec, strat_snow, co2diag, co2prog)
+
    ! Copy over atmospheric 3-D variables to surface fields:
+   !$acc parallel loop
    do i=1,ncol
      air_temp_bot(i) = air_temp(i,pver)
      pot_temp_bot(i) = air_temp(i,pver) * inv_ps_exner(i,pver)
@@ -121,6 +133,7 @@ subroutine set_surface_coupling_vars_run(ncol, pver, ncnst, gravit, rair, phis, 
                                 surf_pres, air_temp_bot, sea_lev_pres)
 
    ! Set surface constituent values:
+   !$acc parallel loop collapse(2)
    do m = 1, ncnst
      do i = 1, ncol
        cnst_bot(i,m) = cnst_array(i,pver,m)
@@ -130,18 +143,22 @@ subroutine set_surface_coupling_vars_run(ncol, pver, ncnst, gravit, rair, phis, 
    ! Export the CO2 volume mixing ratio for surface models.
    ! do_diagnostic_co2 selects whether it is sent in the diagnostic
    ! or prognostic coupler field (for surface model).
+   !$acc kernels
    co2diag(:) = 0._kind_phys
    co2prog(:) = 0._kind_phys
-   call ccpp_constituent_index('CO2', co2_idx, errcode, errmsg)
-   if (errcode /= 0) return
+   !$acc end kernels
+
+   if (errcode == 0) then  ! the CO2 index lookup succeeded
 
    if (co2_idx > 0) then
      ! Convert bottom-layer dry mass mixing ratio to ppmv expected by the coupler:
      if (do_diagnostic_co2) then
+       !$acc parallel loop
        do i = 1, ncol
          co2diag(i) = cnst_array(i,pver,co2_idx) * dry_air_to_co2_molar_mass_ratio * 1.0e+6_kind_phys
        end do
      else
+       !$acc parallel loop
        do i = 1, ncol
          co2prog(i) = cnst_array(i,pver,co2_idx) * dry_air_to_co2_molar_mass_ratio * 1.0e+6_kind_phys
        end do
@@ -152,6 +169,7 @@ subroutine set_surface_coupling_vars_run(ncol, pver, ncnst, gravit, rair, phis, 
    ! Precipation and snow rates from shallow convection, deep convection and stratiform processes.
    ! Compute total convective and stratiform precipitation and snow rates
    !
+   !$acc parallel loop
    do i=1,ncol
       conv_prec(i)  = prec_dp(i) + prec_sh(i)
       conv_snow(i)  = snow_dp(i) + snow_sh(i)
@@ -159,6 +177,10 @@ subroutine set_surface_coupling_vars_run(ncol, pver, ncnst, gravit, rair, phis, 
       strat_prec(i) = prec_str(i)  !Might be better to have microphysics set these directly
       strat_snow(i) = snow_str(i)
    end do
+
+   end if  ! errcode == 0
+
+   !$acc end data
 
 end subroutine set_surface_coupling_vars_run
 
@@ -205,6 +227,7 @@ subroutine calc_sea_level_pressure(ncol, gravit, rair, pbot, phis, ps, tbot, psl
   !-----------------------------------------------------------------------
 
   alpha = rair*xlapse/gravit
+  !$acc parallel loop private(Tstar, TT0, alph, beta) copyin(pbot, phis, ps, tbot) copy(psl)
   do i=1,ncol
     if ( abs(phis(i)/gravit) < 1.e-4_kind_phys )then
       psl(i)=ps(i)

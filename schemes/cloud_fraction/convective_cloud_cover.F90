@@ -84,17 +84,27 @@ contains
 
     ! Local variables
     integer :: i, k
+    real(kind_phys) :: sh1_loc, sh2_loc, dp1_loc, dp2_loc ! module tuning parameters, for the device
 
     errmsg = ''
     errflg = 0
 
+    sh1_loc = sh1
+    sh2_loc = sh2
+    dp1_loc = dp1
+    dp2_loc = dp2
+
+    !$acc data copyin(shfrc, cmfmc_total, cmfmc_sh) copy(shallowcu, deepcu, concld)
+    !$acc kernels
     concld(:ncol, :) = 0.0_kind_phys
+    !$acc end kernels
+    !$acc parallel loop collapse(2)
     do k = top_lev_cloudphys, pver
       do i = 1, ncol
         if (.not. use_shfrc) then
           ! Compute the shallow convection cloud cover using the shallow convective mass flux.
           shallowcu(i, k) = max(0.0_kind_phys, &
-                                min(sh1*log(1.0_kind_phys + sh2*cmfmc_sh(i, k + 1)), 0.30_kind_phys))
+                                min(sh1_loc*log(1.0_kind_phys + sh2_loc*cmfmc_sh(i, k + 1)), 0.30_kind_phys))
         else
           ! If use shallow convective calculated clouds, then just assign
           shallowcu(i, k) = shfrc(i, k)
@@ -103,9 +113,9 @@ contains
         ! REMOVECAM: This could be changed to use deep convective mass flux
         ! since it is independently available in CCPP, once CAM is retired
         deepcu(i, k) = max(0.0_kind_phys, &
-                           min(dp1 * &
+                           min(dp1_loc * &
                                log(1.0_kind_phys + &
-                                   dp2 * (cmfmc_total(i, k + 1) - cmfmc_sh(i, k + 1)) &
+                                   dp2_loc * (cmfmc_total(i, k + 1) - cmfmc_sh(i, k + 1)) &
                                 ), &
                                0.60_kind_phys))
 
@@ -115,6 +125,7 @@ contains
         concld(i, k) = min(shallowcu(i, k) + deepcu(i, k), 0.80_kind_phys)
       end do
     end do
+    !$acc end data
 
   end subroutine convective_cloud_cover_run
 

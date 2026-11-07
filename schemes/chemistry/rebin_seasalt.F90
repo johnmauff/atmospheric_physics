@@ -140,7 +140,8 @@ contains
   ! Rebin 4 sea salt bins into accumulation and coarse modes.
 !> \section arg_table_rebin_seasalt_run Argument Table
 !! \htmlinclude rebin_seasalt_run.html
-  pure subroutine rebin_seasalt_run( &
+  ! Not pure: it contains an OpenACC compute construct.
+  subroutine rebin_seasalt_run( &
     ncol, pver, &
     constituents, &
     errmsg, errflg)
@@ -154,24 +155,34 @@ contains
     ! Local variables
     integer         :: i, k
     real(kind_phys) :: sslt_sum  ! sum of 4 sea salt bins [kg kg-1]
+    ! Module constituent indices, for the device
+    integer         :: i_sslt1, i_sslt2, i_sslt3, i_sslt4, i_sslta, i_ssltc
 
     errmsg = ''
     errflg = 0
 
     if (.not. has_sslt) return
 
+    i_sslt1 = idx_sslt1
+    i_sslt2 = idx_sslt2
+    i_sslt3 = idx_sslt3
+    i_sslt4 = idx_sslt4
+    i_sslta = idx_sslta
+    i_ssltc = idx_ssltc
+
+    !$acc parallel loop collapse(2) private(sslt_sum) copy(constituents)
     do k = 1, pver
       do i = 1, ncol
-        sslt_sum = constituents(i, k, idx_sslt1) &
-                 + constituents(i, k, idx_sslt2) &
-                 + constituents(i, k, idx_sslt3) &
-                 + constituents(i, k, idx_sslt4)
+        sslt_sum = constituents(i, k, i_sslt1) &
+                 + constituents(i, k, i_sslt2) &
+                 + constituents(i, k, i_sslt3) &
+                 + constituents(i, k, i_sslt4)
 
         ! Accumulation mode: fraction (1 - wgt_sscm) = 1/7 of total
-        constituents(i, k, idx_sslta) = (1.0_kind_phys - wgt_sscm) * sslt_sum
+        constituents(i, k, i_sslta) = (1.0_kind_phys - wgt_sscm) * sslt_sum
 
         ! Coarse mode: fraction wgt_sscm = 6/7 of total
-        constituents(i, k, idx_ssltc) = wgt_sscm * sslt_sum
+        constituents(i, k, i_ssltc) = wgt_sscm * sslt_sum
       end do
     end do
 

@@ -118,15 +118,20 @@ contains
     integer,            intent(out)   :: errflg           ! error flag
 
     ! Local variables
-    integer :: k
+    integer :: i, k
+    real(kind_phys), allocatable :: sponge(:)  ! kvm_sponge, for the device
 
     errmsg = ''
     errflg = 0
 
     ! Add sponge layer vertical diffusion
     if (allocated(kvm_sponge)) then
-      do k = 1, size(kvm_sponge(:))
-        kvm(:ncol, k) = kvm(:ncol, k) + diff_sponge_fac * kvm_sponge(k)
+      sponge = kvm_sponge
+      !$acc parallel loop collapse(2) copyin(sponge) copy(kvm)
+      do k = 1, size(sponge)
+        do i = 1, ncol
+          kvm(i, k) = kvm(i, k) + diff_sponge_fac * sponge(k)
+        end do
       end do
     end if
 
