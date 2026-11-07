@@ -32,10 +32,17 @@ contains
     character(len=512), intent(out)   :: errmsg
     integer,            intent(out)   :: errflg
 
+    integer :: i, k
+
     errmsg = ''
     errflg = 0
 
-    scaling_dycore(:ncol,:) = cpairv(:ncol,:) / cp_or_cv_dycore(:ncol,:)
+    !$acc parallel loop collapse(2) copyin(cpairv, cp_or_cv_dycore) copy(scaling_dycore)
+    do k = 1, size(scaling_dycore, 2)
+      do i = 1, ncol
+        scaling_dycore(i,k) = cpairv(i,k) / cp_or_cv_dycore(i,k)
+      end do
+    end do
 
   end subroutine check_energy_scaling_run
 

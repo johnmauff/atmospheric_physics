@@ -31,6 +31,8 @@ contains
     character(len=512), intent(out)   :: errmsg                ! error message
     integer,            intent(out)   :: errflg                ! error flag
 
+    integer :: i, k
+
     errmsg = ''
     errflg = 0
 
@@ -43,7 +45,12 @@ contains
       !
       ! the terms can be arranged for this scaling to be applied through scheme tendencies
       ! at the cost of a round-off level difference
-      tend_dTdt_local(:ncol,:) = (scaling_dycore(:ncol,:) - 1._kind_phys) * tend_dTdt(:ncol,:)
+      !$acc parallel loop collapse(2) copyin(scaling_dycore, tend_dTdt) copy(tend_dTdt_local)
+      do k = 1, pver
+        do i = 1, ncol
+          tend_dTdt_local(i,k) = (scaling_dycore(i,k) - 1._kind_phys) * tend_dTdt(i,k)
+        end do
+      end do
     endif
     ! do nothing for dynamical cores with energy consistent with CAM physics
 

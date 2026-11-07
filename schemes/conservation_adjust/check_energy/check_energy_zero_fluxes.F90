@@ -25,15 +25,20 @@ contains
     character(len=512), intent(out)    :: errmsg         ! error message
     integer,            intent(out)    :: errflg         ! error flag
 
+    integer :: i
+
     errmsg = ''
     errflg = 0
 
-    ! reset values to zero
+    ! reset values to zero (the fluxes are (horizontal_loop_extent) = ncol)
     name = ''
-    flx_vap(:) = 0._kind_phys
-    flx_cnd(:) = 0._kind_phys
-    flx_ice(:) = 0._kind_phys
-    flx_sen(:) = 0._kind_phys
+    !$acc parallel loop copy(flx_vap, flx_cnd, flx_ice, flx_sen)
+    do i = 1, ncol
+      flx_vap(i) = 0._kind_phys
+      flx_cnd(i) = 0._kind_phys
+      flx_ice(i) = 0._kind_phys
+      flx_sen(i) = 0._kind_phys
+    end do
   end subroutine check_energy_zero_fluxes_run
 
 end module check_energy_zero_fluxes
