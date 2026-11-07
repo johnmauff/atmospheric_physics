@@ -80,10 +80,13 @@ CONTAINS
 
     integer                      :: i,k      ! longitude, level indices
     integer                      :: jiter    ! iteration index
-    real(kind_phys), allocatable :: c1dad(:) ! intermediate constant
-    real(kind_phys), allocatable :: c2dad(:) ! intermediate constant
-    real(kind_phys), allocatable :: c3dad(:) ! intermediate constant
-    real(kind_phys), allocatable :: c4dad(:) ! intermediate constant
+    integer                      :: nlv      ! nlvdry, for the device
+    integer                      :: nit      ! niter, for the device
+    ! Intermediate constants, per column (each column is adjusted on its own).
+    real(kind_phys), allocatable :: c1dad(:,:)
+    real(kind_phys), allocatable :: c2dad(:,:)
+    real(kind_phys), allocatable :: c3dad(:,:)
+    real(kind_phys), allocatable :: c4dad(:,:)
     real(kind_phys) :: gammad    ! dry adiabatic lapse rate (deg/Pa)
     real(kind_phys) :: zeps      ! convergence criterion (deg/Pa)
     real(kind_phys) :: rdenom    ! reciprocal of denominator of expression
@@ -96,122 +99,142 @@ CONTAINS
     real(kind_phys) :: q(ncol,nz)
 
     logical :: ilconv          ! .TRUE. ==> convergence was attained
-    logical :: dodad(ncol)     ! .TRUE. ==> do dry adjustment
+    logical :: done            ! .TRUE. ==> the column is finished
+    logical :: dodad           ! .TRUE. ==> do dry adjustment
+    logical :: failed(ncol)    ! .TRUE. ==> no convergence in the column
 
     !-----------------------------------------------------------------------
 
-    zeps = 2.0e-5_kind_phys           ! set convergence criteria
     errmsg = ''
     errflg = 0
     scheme_name = 'DADADJ'
+    nlv = nlvdry
+    nit = niter
 
-    allocate(c1dad(nlvdry), stat=errflg)
+    allocate(c1dad(ncol,nlvdry), stat=errflg)
     if (errflg /= 0) then
-       errmsg = trim(scheme_name)//': Allocate of c1dad(nlvdry) failed'
+       errmsg = trim(scheme_name)//': Allocate of c1dad(ncol,nlvdry) failed'
        return
     end if
-    allocate(c2dad(nlvdry), stat=errflg)
+    allocate(c2dad(ncol,nlvdry), stat=errflg)
     if (errflg /= 0) then
-       errmsg = trim(scheme_name)//': Allocate of c2dad(nlvdry) failed'
+       errmsg = trim(scheme_name)//': Allocate of c2dad(ncol,nlvdry) failed'
        return
     end if
-    allocate(c3dad(nlvdry), stat=errflg)
+    allocate(c3dad(ncol,nlvdry), stat=errflg)
     if (errflg /= 0) then
-       errmsg = trim(scheme_name)//': Allocate of c3dad(nlvdry) failed'
+       errmsg = trim(scheme_name)//': Allocate of c3dad(ncol,nlvdry) failed'
        return
     end if
-    allocate(c4dad(nlvdry), stat=errflg)
+    allocate(c4dad(ncol,nlvdry), stat=errflg)
     if (errflg /= 0) then
-       errmsg = trim(scheme_name)//': Allocate of c4dad(nlvdry) failed'
+       errmsg = trim(scheme_name)//': Allocate of c4dad(ncol,nlvdry) failed'
        return
     end if
 
-    t = state_t
-    q = state_q
+    ! Columns are independent: one pass per column finds unstable
+    ! stratification, makes the dry adiabatic adjustment and computes the
+    ! tendencies. Note: nlvdry ****MUST**** be < pver
+    !$acc parallel loop gang vector &
+    !$acc   copyin(pmid, pint, pdel, cappa, cpair, state_t, state_q) &
+    !$acc   copyout(s_tend, q_tend, dadpdf, failed) &
+    !$acc   create(t, q, c1dad, c2dad, c3dad, c4dad)
+    COL: do i = 1, ncol
 
-    ! Find gridpoints with unstable stratification
+       do k = 1, nz
+          t(i,k) = state_t(i,k)
+          q(i,k) = state_q(i,k)
+          dadpdf(i,k) = 0._kind_phys
+       end do
+       failed(i) = .false.
 
-    do i = 1, ncol
+       ! Find gridpoints with unstable stratification
+       zeps = 2.0e-5_kind_phys           ! set convergence criteria
        cappaint = 0.5_kind_phys*(cappa(i,2) + cappa(i,1))
        gammad = cappaint*0.5_kind_phys*(t(i,2) + t(i,1))/pint(i,2)
        dtdp = (t(i,2) - t(i,1))/(pmid(i,2) - pmid(i,1))
-       dodad(i) = (dtdp + zeps) > gammad
+       dodad = (dtdp + zeps) > gammad
+       do k = 2, nlv
+          cappaint = 0.5_kind_phys*(cappa(i,k+1) + cappa(i,k))
+          gammad = cappaint*0.5_kind_phys*(t(i,k+1) + t(i,k))/pint(i,k+1)
+          dtdp = (t(i,k+1) - t(i,k))/(pmid(i,k+1) - pmid(i,k))
+          dodad = dodad .or. (dtdp + zeps) > gammad
+          if ((dtdp + zeps) > gammad) then
+             dadpdf(i,k) = 1._kind_phys
+          end if
+       end do
+
+       ! Make a dry adiabatic adjustment
+       if (dodad) then
+
+          do k = 1, nlv
+             cappaint = 0.5_kind_phys*(cappa(i,k+1) + cappa(i,k))
+             c1dad(i,k) = cappaint*0.5_kind_phys*(pmid(i,k+1)-pmid(i,k))/pint(i,k+1)
+             c2dad(i,k) = (1._kind_phys - c1dad(i,k))/(1._kind_phys + c1dad(i,k))
+             rdenom = 1._kind_phys/(pdel(i,k)*c2dad(i,k) + pdel(i,k+1))
+             c3dad(i,k) = rdenom*pdel(i,k)
+             c4dad(i,k) = rdenom*pdel(i,k+1)
+          end do
+
+          ! Iterate to convergence; if niter iterations do not converge,
+          ! double zeps and start again, until zeps exceeds 1.e-4.
+          done = .false.
+          DBLZEP: do while (.not. done)
+
+             ilconv = .false.
+             do jiter = 1, nit
+                ilconv = .true.
+
+                do k = 1, nlv
+                   zepsdp = zeps*(pmid(i,k+1) - pmid(i,k))
+                   zgamma = c1dad(i,k)*(t(i,k) + t(i,k+1))
+
+                   if ((t(i,k+1)-t(i,k)) >= (zgamma+zepsdp)) then
+                      ilconv = .false.
+                      t(i,k+1) = t(i,k)*c3dad(i,k) + t(i,k+1)*c4dad(i,k)
+                      t(i,k) = c2dad(i,k)*t(i,k+1)
+                      qave = (pdel(i,k+1)*q(i,k+1) + pdel(i,k)*q(i,k))/(pdel(i,k+1)+ pdel(i,k))
+                      q(i,k+1) = qave
+                      q(i,k) = qave
+                   end if
+
+                end do
+
+                if (ilconv) exit ! convergence => this column is done
+
+             end do
+
+             if (ilconv) then
+                done = .true.
+             else
+                zeps = zeps + zeps
+                if (zeps > 1.e-4_kind_phys) then
+                   failed(i) = .true.
+                   done = .true.
+                end if
+             end if
+          end do DBLZEP
+
+       end if
+
+       do k = 1, nz
+          s_tend(i,k) = (t(i,k) - state_t(i,k))/dt*cpair(i,k)
+          q_tend(i,k) = (q(i,k) - state_q(i,k))/dt
+       end do
+
+    end do COL
+
+    deallocate(c1dad, c2dad, c3dad, c4dad)
+
+    ! Error return at the first column that did not converge.
+    do i = 1, ncol
+       if (failed(i)) then
+          errflg = i
+          write(errmsg,*) trim(scheme_name)//': Convergence failure at column ',i,' zeps > 1.e-4 '// &
+               '(errflg set to failing column index)'
+          return
+       end if
     end do
-
-    dadpdf(:ncol,:) = 0._kind_phys
-    do k= 2, nlvdry
-       do i = 1, ncol
-         cappaint = 0.5_kind_phys*(cappa(i,k+1) + cappa(i,k))
-         gammad = cappaint*0.5_kind_phys*(t(i,k+1) + t(i,k))/pint(i,k+1)
-         dtdp = (t(i,k+1) - t(i,k))/(pmid(i,k+1) - pmid(i,k))
-         dodad(i) = dodad(i) .or. (dtdp + zeps) > gammad
-         if ((dtdp + zeps) > gammad) then
-            dadpdf(i,k) = 1._kind_phys
-         end if
-      end do
-   end do
-
-   ! Make a dry adiabatic adjustment
-   ! Note: nlvdry ****MUST**** be < pver
-
-   COL: do i = 1, ncol
-
-      if (dodad(i)) then
-
-         zeps = 2.0e-5_kind_phys
-
-         do k = 1, nlvdry
-            cappaint = 0.5_kind_phys*(cappa(i,k+1) + cappa(i,k))
-            c1dad(k) = cappaint*0.5_kind_phys*(pmid(i,k+1)-pmid(i,k))/pint(i,k+1)
-            c2dad(k) = (1._kind_phys - c1dad(k))/(1._kind_phys + c1dad(k))
-            rdenom = 1._kind_phys/(pdel(i,k)*c2dad(k) + pdel(i,k+1))
-            c3dad(k) = rdenom*pdel(i,k)
-            c4dad(k) = rdenom*pdel(i,k+1)
-         end do
-
-         ilconv = .false.
-
-         DBLZEP: do while (.not. ilconv)
-
-            do jiter = 1, niter
-               ilconv = .true.
-
-               do k = 1, nlvdry
-                  zepsdp = zeps*(pmid(i,k+1) - pmid(i,k))
-                  zgamma = c1dad(k)*(t(i,k) + t(i,k+1))
-
-                  if ((t(i,k+1)-t(i,k)) >= (zgamma+zepsdp)) then
-                     ilconv = .false.
-                     t(i,k+1) = t(i,k)*c3dad(k) + t(i,k+1)*c4dad(k)
-                     t(i,k) = c2dad(k)*t(i,k+1)
-                     qave = (pdel(i,k+1)*q(i,k+1) + pdel(i,k)*q(i,k))/(pdel(i,k+1)+ pdel(i,k))
-                     q(i,k+1) = qave
-                     q(i,k) = qave
-                  end if
-
-               end do
-
-               if (ilconv) cycle COL ! convergence => next longitude
-
-            end do
-
-            zeps = zeps + zeps
-            if (zeps > 1.e-4_kind_phys) then
-               errflg = i
-               write(errmsg,*) trim(scheme_name)//': Convergence failure at column ',i,' zeps > 1.e-4 '// &
-                    '(errflg set to failing column index)'
-               return                ! error return
-            end if
-         end do DBLZEP
-
-      end if
-
-   end do COL
-
-   s_tend = (t - state_t)/dt*cpair
-   q_tend = (q - state_q)/dt
-
-   deallocate(c1dad, c2dad, c3dad, c4dad)
 
  end subroutine dadadj_run
 
