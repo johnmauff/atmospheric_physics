@@ -135,7 +135,7 @@ CONTAINS
         inv_exner, zm, pint, pintdry, lnpint, lnpintdry, zi, const_array,     &
         const_props, errmsg, errflg)
 
-      use cam_history, only: history_out_field
+      use cam_history, only: history_out_field, is_history_field_active
       !------------------------------------------------
       !   Input / output parameters
       !------------------------------------------------
@@ -180,28 +180,53 @@ CONTAINS
       errflg = 0
 
       ! Capture state fields
+      ! On the GPU, pull each field to the host only if it is on a history
+      ! file; if_present: a no-op where the field is host data.
+      !$acc update self(ps) if(is_history_field_active('PS')) if_present
       call history_out_field('PS'       , ps)
+      !$acc update self(psdry) if(is_history_field_active('PSDRY')) if_present
       call history_out_field('PSDRY'    , psdry)
+      !$acc update self(phis) if(is_history_field_active('PHIS')) if_present
       call history_out_field('PHIS'     , phis)
+      !$acc update self(T) if(is_history_field_active('T')) if_present
       call history_out_field('T'        , T)
+      !$acc update self(u) if(is_history_field_active('U')) if_present
       call history_out_field('U'        , u)
+      !$acc update self(v) if(is_history_field_active('V')) if_present
       call history_out_field('V'        , v)
+      !$acc update self(dse) if(is_history_field_active('DSE')) if_present
       call history_out_field('DSE'      , dse)
+      !$acc update self(omega) if(is_history_field_active('OMEGA')) if_present
       call history_out_field('OMEGA'    , omega)
+      !$acc update self(pmid) if(is_history_field_active('PMID')) if_present
       call history_out_field('PMID'     , pmid)
+      !$acc update self(pmiddry) if(is_history_field_active('PMIDDRY')) if_present
       call history_out_field('PMIDDRY'  , pmiddry)
+      !$acc update self(pdel) if(is_history_field_active('PDEL')) if_present
       call history_out_field('PDEL'     , pdel)
+      !$acc update self(pdeldry) if(is_history_field_active('PDELDRY')) if_present
       call history_out_field('PDELDRY'  , pdeldry)
+      !$acc update self(rpdel) if(is_history_field_active('RPDEL')) if_present
       call history_out_field('RPDEL'    , rpdel)
+      !$acc update self(rpdeldry) if(is_history_field_active('RPDELDRY')) if_present
       call history_out_field('RPDELDRY' , rpdeldry)
+      !$acc update self(lnpmid) if(is_history_field_active('LNPMID')) if_present
       call history_out_field('LNPMID'   , lnpmid)
+      !$acc update self(lnpmiddry) if(is_history_field_active('LNPMIDDRY')) if_present
       call history_out_field('LNPMIDDRY', lnpmiddry)
+      !$acc update self(inv_exner) if(is_history_field_active('EXNER')) if_present
       call history_out_field('EXNER'    , inv_exner)
+      !$acc update self(zm) if(is_history_field_active('ZM')) if_present
       call history_out_field('ZM'       , zm)
+      !$acc update self(pint) if(is_history_field_active('PINT')) if_present
       call history_out_field('PINT'     , pint)
+      !$acc update self(pintdry) if(is_history_field_active('PINTDRY')) if_present
       call history_out_field('PINTDRY'  , pintdry)
+      !$acc update self(lnpint) if(is_history_field_active('LNPINT')) if_present
       call history_out_field('LNPINT'   , lnpint)
+      !$acc update self(lnpintdry) if(is_history_field_active('LNPINTDRY')) if_present
       call history_out_field('LNPINTDRY', lnpintdry)
+      !$acc update self(zi) if(is_history_field_active('ZI')) if_present
       call history_out_field('ZI'       , zi)
 
       ! Capture expected constituent fields
