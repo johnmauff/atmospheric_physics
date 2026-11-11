@@ -106,23 +106,38 @@ subroutine zm_conv_evap_run(ncol, pver, pverp, &
     errflg = 0
 
     old_snow=.true.
+    omsm=0.9999_kind_phys
+
+    ! OpenACC: one thread per column, levels sequential (the top-down pass is
+    ! the CPU's per-column order). The vector qsat runs its own kernels on
+    ! es and qs, which this data region makes present.
+    !$acc data copyin(t, pmid, pdel, q, prdprec_gen, cldfrc, fsnow_conv) &
+    !$acc      copy(prec_gen) &
+    !$acc      copyout(tend_s, tend_q, tend_s_snwprd, tend_s_snwevmlt, snow, &
+    !$acc              flxprec, flxsnow, ntprprd, ntsnprd) &
+    !$acc      create(es, qs, evpvint, evpprec, evpsnow, snowmlt, flxsntm)
 
 ! convert input precip to kg/m2/s
-    prec_gen(:ncol) = prec_gen(:ncol)* density_fresh_water
+    !$acc parallel loop gang vector
+    do i = 1, ncol
+       prec_gen(i) = prec_gen(i)* density_fresh_water
+    end do
 
 ! determine saturation vapor pressure
     do k = 1,pver
        call qsat(t(1:ncol,k), pmid(1:ncol,k), es(1:ncol,k), qs(1:ncol,k), ncol)
     end do
 
-! zero the flux integrals on the top boundary
-    flxprec(:ncol,1) = 0._kind_phys
-    flxsnow(:ncol,1) = 0._kind_phys
-    evpvint(:ncol)   = 0._kind_phys
-    omsm=0.9999_kind_phys
+    !$acc parallel loop gang vector private(k, work1, work2, kemask, evplimit, dum)
+    do i = 1, ncol
 
-    do k = 1, pver
-       do i = 1, ncol
+! zero the flux integrals on the top boundary
+       flxprec(i,1) = 0._kind_phys
+       flxsnow(i,1) = 0._kind_phys
+       evpvint(i)   = 0._kind_phys
+
+       !$acc loop seq
+       do k = 1, pver
 
 ! Melt snow falling into layer, if necessary.
          if( old_snow ) then
@@ -233,12 +248,14 @@ subroutine zm_conv_evap_run(ncol, pver, pverp, &
           end if
           tend_q(i,k) = evpprec(i)
        end do
-    end do
 
 ! set output precipitation rates (m/s)
 ! convert from 'kg m-2 s-1' to 'm s-1'
-    prec_gen(:ncol) = flxprec(:ncol,pverp) / density_fresh_water
-    snow(:ncol) = flxsnow(:ncol,pverp) / density_fresh_water
+       prec_gen(i) = flxprec(i,pverp) / density_fresh_water
+       snow(i) = flxsnow(i,pverp) / density_fresh_water
+    end do
+
+    !$acc end data
 
   end subroutine zm_conv_evap_run
 

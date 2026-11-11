@@ -31,6 +31,10 @@ module compute_cloud_fraction
   ! tuning constants
   real(kind_phys), parameter :: pretop = 1.0e2_kind_phys ! pressure bounding high cloud [Pa]
 
+  ! The run-phase kernels read these on the device; set by init.
+  !$acc declare create(cldfrc_freeze_dry, cldfrc_ice, iceopt, rhminl, rhminl_adj_land, rhminh, &
+  !$acc                premit, premib, icecrit, k700)
+
 contains
   ! Initialize cloud_fraction from namelist parameters
 !> \section arg_table_compute_cloud_fraction_init Argument Table
@@ -95,6 +99,9 @@ contains
     if(amIRoot) then
       write(iulog,*) 'compute_cloud_fraction: model level nearest 700 mb is ',k700,' which is ',pref_mid(k700),' pascals '
     endif
+
+    !$acc update device(cldfrc_freeze_dry, cldfrc_ice, iceopt, rhminl, rhminl_adj_land, rhminh, &
+    !$acc               premit, premib, icecrit, k700)
 
   end subroutine compute_cloud_fraction_init
 
@@ -196,9 +203,7 @@ contains
     real(kind_phys) :: rpdeli(ncol, pver - 1)      ! 1./(pmid(k+1)-pmid(k))
     real(kind_phys) :: rhpert                      ! the specified perturbation to rh
 
-    logical  :: cldbnd(ncol)           ! region below high cloud boundary
-
-    integer  :: i, ierror, k           ! column, level indices
+    integer  :: i, k                   ! column, level indices
     integer  :: kp1, ifld
     integer  :: kdthdp(ncol)
     integer  :: numkcld                ! number of levels in which to allow clouds
@@ -212,10 +217,6 @@ contains
     real(kind_phys) :: esl(ncol, pver)        ! liq sat vapor pressure
     real(kind_phys) :: esi(ncol, pver)        ! ice sat vapor pressure
     real(kind_phys) :: ncf, phi               ! Wilson and Ballard parameters
-
-    ! Statement functions
-    logical land
-    land(i) = nint(landfrac(i)) == 1
 
     errmsg = ''
     errflg = 0
@@ -244,8 +245,18 @@ contains
     ! (a sum as opposed to a logical "or" operation)
     !
     !==================================================================================
+    ! OpenACC: the vector qsat/svp calls run their own kernels on es, qs, esl
+    ! and esi, which this data region makes present. Per-column passes (the
+    ! inversion search) are one thread per column with levels sequential.
+    !$acc data copyin(pmid, ps, temp, sst, q, cldice, phis, concld, landfrac, ocnfrac, snowh) &
+    !$acc      copyout(cloud, rhcloud, cldst, rhu00, icecldf, liqcldf) &
+    !$acc      copy(relhum) &
+    !$acc      create(dthdpmn, es, qs, rh, theta, thetas, rpdeli, kdthdp, esl, esi)
+
     ! set defaults for rhu00 - arbitrary number larger than 1.0 (100%)
+    !$acc kernels
     rhu00(:, :) = 2.0_kind_phys
+    !$acc end kernels
     ! define rh perturbation in order to estimate rhdfda
     rhpert = 0.01_kind_phys
 
@@ -277,16 +288,19 @@ contains
       end do
     end if
 
+    !$acc kernels
     cloud = 0._kind_phys
     icecldf = 0._kind_phys
     liqcldf = 0._kind_phys
     rhcloud = 0._kind_phys
     cldst = 0._kind_phys
+    !$acc end kernels
 
+    !$acc parallel loop gang vector collapse(2)
     do k = top_lev_cloudphys, pver
-      theta(:ncol, k) = temp(:ncol, k)*(pref/pmid(:ncol, k))**cappa
-
       do i = 1, ncol
+        theta(i, k) = temp(i, k)*(pref/pmid(i, k))**cappa
+
         if(.not. rhpert_flag) then
           ! default: no RH perturbation
           rh(i, k) = q(i, k)/qs(i, k)
@@ -299,25 +313,26 @@ contains
     end do
 
     ! Initialize other temporary variables
-    ierror = 0
+    !$acc parallel loop gang vector
     do i = 1, ncol
       ! Adjust thetas(i) in the presence of non-zero ocean heights.
       ! This reduces the temperature for positive heights according to a standard lapse rate.
       if (ocnfrac(i) > 0.01_kind_phys) then
         thetas(i) = (sst(i) - lapse_rate*phis(i)/gravit)*(pref/ps(i))**cappa
       endif
-      if (ocnfrac(i) > 0.01_kind_phys .and. sst(i) < 260._kind_phys) then
-        ierror = i
-      endif
     end do
 
+    !$acc parallel loop gang vector collapse(2)
     do k = top_lev_cloudphys, pver - 1
-      rpdeli(:ncol, k) = 1._kind_phys/(pmid(:ncol, k + 1) - pmid(:ncol, k))
+      do i = 1, ncol
+        rpdeli(i, k) = 1._kind_phys/(pmid(i, k + 1) - pmid(i, k))
+      end do
     end do
 
     ! shallow and deep convective cloudiness are calculated in the
     ! convective_cloud_cover CCPP scheme.
 #ifndef PERGRO
+    !$acc parallel loop gang vector collapse(2)
     do k = top_lev_cloudphys, pver
       do i = 1, ncol
         rh(i, k) = (rh(i, k) - concld(i, k))/(1.0_kind_phys - concld(i, k))
@@ -333,18 +348,18 @@ contains
     !====================================================================
     !
     numkcld = pver
+    !$acc parallel loop gang vector collapse(2) &
+    !$acc   private(rhlim, rhdif, rhwght, ttmp, icicval, rho, ncf, phi)
     do k = top_lev_cloudphys + 1, numkcld
-      kp1 = min(k + 1, pver)
       do i = 1, ncol
         ! This is now designed to apply FOR LIQUID CLOUDS (condensation > RH water)
-        cldbnd(i) = pmid(i, k) >= pretop
 
         if (pmid(i, k) >= premib) then
           !==============================================================
           ! This is the low cloud (below premib) block
           !==============================================================
           ! enhance low cloud activation over land with no snow cover
-          if (land(i) .and. (snowh(i) <= 0.000001_kind_phys)) then
+          if (nint(landfrac(i)) == 1 .and. (snowh(i) <= 0.000001_kind_phys)) then
             rhlim = rhminl - rhminl_adj_land
           else
             rhlim = rhminl
@@ -377,7 +392,7 @@ contains
           !
           rhwght = (premib - (max(pmid(i, k), premit)))/(premib - premit)
 
-          if (land(i) .and. (snowh(i) <= 0.000001_kind_phys)) then
+          if (nint(landfrac(i)) == 1 .and. (snowh(i) <= 0.000001_kind_phys)) then
             rhlim = rhminh*rhwght + (rhminl - rhminl_adj_land)*(1.0_kind_phys - rhwght)
           else
             rhlim = rhminh*rhwght + rhminl*(1.0_kind_phys - rhwght)
@@ -495,14 +510,15 @@ contains
       !
       ! Find most stable level below 750 mb for evaluating stratus regimes
       !
+      !$acc parallel loop gang vector private(dthdp)
       do i = 1, ncol
         ! Nothing triggers unless a stability greater than this minimum threshold is found
         dthdpmn(i) = -0.125_kind_phys
         kdthdp(i) = 0
-      end do
 
-      do k = top_lev_cloudphys + 1, pver
-        do i = 1, ncol
+        ! levels in order: the first most stable level wins, as on the CPU
+        !$acc loop seq
+        do k = top_lev_cloudphys + 1, pver
           if (pmid(i, k) >= premib .and. ocnfrac(i) > 0.01_kind_phys) then
             ! I think this is done so that dtheta/dp is in units of dg/mb (JJH)
             dthdp = 100.0_kind_phys*(theta(i, k) - theta(i, k - 1))*rpdeli(i, k - 1)
@@ -516,6 +532,7 @@ contains
 
       ! Also check between the bottom layer and the surface
       ! Only perform this check if the criteria were not met above
+      !$acc parallel loop gang vector private(dthdp)
       do i = 1, ncol
         if (kdthdp(i) .eq. 0 .and. ocnfrac(i) > 0.01_kind_phys) then
           dthdp = 100.0_kind_phys*(thetas(i) - theta(i, pver))/(ps(i) - pmid(i, pver))
@@ -526,6 +543,7 @@ contains
         end if
       end do
 
+      !$acc parallel loop gang vector private(k, kp1, strat)
       do i = 1, ncol
         if (kdthdp(i) /= 0) then
           k = kdthdp(i)
@@ -543,6 +561,7 @@ contains
       end do
     end if  ! .not.inversion_cld_off
 
+    !$acc parallel loop gang vector collapse(2)
     do k = top_lev_cloudphys, pver
       do i = 1, ncol
         ! which is greater; standard layered cloud amount or stratocumulus diagnosis
@@ -553,6 +572,8 @@ contains
         cloud(i, k) = min(cloud(i, k) + concld(i, k), 1.0_kind_phys)
       end do
     end do
+
+    !$acc end data
 
   end subroutine compute_cloud_fraction_run
 end module compute_cloud_fraction
