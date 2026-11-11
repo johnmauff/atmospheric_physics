@@ -456,6 +456,16 @@ subroutine zm_convr_run(     ncol    ,pver    , &
    mcon(:,:) = 0._kind_phys
    rliq(:ncol)   = 0._kind_phys
 
+! The gathered outputs are computed only for the first lengath columns
+! (none when no column convects); zero them over all columns so these
+! intent(out) arrays are fully defined.
+   mu(:ncol,:) = 0._kind_phys
+   eu(:ncol,:) = 0._kind_phys
+   du(:ncol,:) = 0._kind_phys
+   md(:ncol,:) = 0._kind_phys
+   ed(:ncol,:) = 0._kind_phys
+   dp(:ncol,:) = 0._kind_phys
+
 !
 ! initialize convective tendencies
 !
