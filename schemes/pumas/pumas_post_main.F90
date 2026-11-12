@@ -44,7 +44,7 @@ contains
     character(len=*),          intent(out) :: errmsg
     integer,                 intent(out) :: errcode
 
-    integer        :: k
+    integer        :: i, k
     real(pumas_r8) :: icimrst(ncol, nlev)  ! in-cloud (grid-mean) ice mixing ratio
     real(pumas_r8) :: niic(ncol, nlev)     ! in-cloud (grid-mean) ice number conc
     real(pumas_r8) :: rei(ncol, nlev)      ! ice slope param, then effective radius
@@ -55,119 +55,126 @@ contains
     real(pumas_r8) :: lambdac(ncol, nlev)  ! droplet size distribution slope
     real(pumas_r8) :: qs(ncol, nlev)       ! grid-mean snow mixing ratio
     real(pumas_r8) :: ns(ncol, nlev)       ! grid-mean snow number conc
-    real(pumas_r8) :: dsout2(ncol, nlev)   ! mean snow particle diameter
-    real(pumas_r8) :: desm(ncol, nlev)     ! snow effective diameter (m)
     real(pumas_r8) :: qg(ncol, nlev)       ! grid-mean graupel mixing ratio
     real(pumas_r8) :: ng(ncol, nlev)       ! grid-mean graupel number conc
-    real(pumas_r8) :: dgout2(ncol, nlev)   ! mean graupel particle diameter
+    real(pumas_r8) :: dsout2               ! mean snow particle diameter
+    real(pumas_r8) :: desm                 ! snow effective diameter (m)
+    real(pumas_r8) :: dgout2               ! mean graupel particle diameter
 
     errmsg = ' '
     errcode = 0
 
-    ! Ice effective radius is recomputed here from the post-microphysics
-    ! grid-mean in-cloud ice, NOT from the raw per-substep value PUMAS returns.
-    ! PUMAS uses the total stratiform fraction for ice cloud (icecldf = ast).
-    icimrst(:,:) = min(real(cldice(:ncol,:), pumas_r8) / &
-                max(mincld, real(strat_cldfrc(:ncol,:), pumas_r8)), 0.005_pumas_r8)
-    niic(:,:)   =    real(numice(:ncol,:), pumas_r8) / &
-                max(mincld, real(strat_cldfrc(:ncol,:), pumas_r8))
+    ! One data region for the whole scheme. PUMAS's size_dist_param_basic and
+    ! size_dist_param_liq run OpenACC kernels (default(present)) when PUMAS is
+    ! built for the GPU, so their arguments must be on the device; the rest of
+    ! the scheme runs in the two pointwise kernels below. Without -acc the
+    ! directives are comments and everything runs on the host as before.
+    !$acc data copyin(pmid, temp, cldliq, numliq, cldice, numice, snow, numsnow, &
+    !$acc             graupel, numgraup, strat_cldfrc, mg_ice_props, mg_liq_props) &
+    !$acc      copyout(effi, dei, pgam, lamc, rel, des, degrau) &
+    !$acc      create(icimrst, niic, rei, icwmrst, ncic, rho, mu, lambdac, &
+    !$acc             qs, ns, qg, ng)
 
-    rei(:,:) = 25._pumas_r8
-    ! size_dist_param_basic runs an OpenACC kernel (default(present)) when
-    ! PUMAS is built for the GPU: its arguments must be on the device.
-    !$acc data copyin(mg_ice_props, icimrst) copy(niic, rei)
+    ! Inputs of the size distribution calculations, on every level.
+    !$acc parallel loop gang vector collapse(2)
+    do k = 1, nlev
+      do i = 1, ncol
+        ! Ice effective radius is recomputed here from the post-microphysics
+        ! grid-mean in-cloud ice, NOT from the raw per-substep value PUMAS returns.
+        ! PUMAS uses the total stratiform fraction for ice cloud (icecldf = ast).
+        icimrst(i,k) = min(real(cldice(i,k), pumas_r8) / &
+                    max(mincld, real(strat_cldfrc(i,k), pumas_r8)), 0.005_pumas_r8)
+        niic(i,k)   =    real(numice(i,k), pumas_r8) / &
+                    max(mincld, real(strat_cldfrc(i,k), pumas_r8))
+        rei(i,k) = 25._pumas_r8
+
+        ! Droplet size distribution parameters for radiation are likewise recomputed
+        ! from the post-microphysics grid-mean in-cloud liquid.
+        ! Air density uses the temperature BEFORE the microphysics heating is applied
+        ! The original comment in CAM noted:
+        !   "State instead of state_loc to preserve answers for MG1 (and in any
+        !    case, it is unlikely to make much difference)."
+        ! PUMAS uses the total stratiform fraction for liquid cloud (liqcldf = ast)
+        rho(i,k)     = real(pmid(i,k), pumas_r8) / &
+                    (real(rair, pumas_r8) * real(temp(i,k), pumas_r8))
+        icwmrst(i,k) = min(real(cldliq(i,k), pumas_r8) / &
+                    max(mincld, real(strat_cldfrc(i,k), pumas_r8)), 0.005_pumas_r8)
+        ncic(i,k)   =    real(numliq(i,k), pumas_r8) / &
+                    max(mincld, real(strat_cldfrc(i,k), pumas_r8))
+        mu(i,k)      = 0._pumas_r8
+        lambdac(i,k) = 0._pumas_r8
+
+        ! Grid-mean snow and graupel
+        qs(i,k) = real(snow(i,k), pumas_r8)
+        ns(i,k) = real(numsnow(i,k), pumas_r8)
+        qg(i,k) = real(graupel(i,k), pumas_r8)
+        ng(i,k) = real(numgraup(i,k), pumas_r8)
+      end do
+    end do
+
+    ! PUMAS's size distribution routines, one level at a time (each launches
+    ! its own kernel on the GPU).
     do k = trop_cloud_top_lev, nlev
       call size_dist_param_basic(mg_ice_props, icimrst(:,k), niic(:,k), rei(:,k), ncol)
     end do
-    !$acc end data
-
-    where (icimrst(:,:) >= qsmall)
-      rei(:,:) = 1.5_pumas_r8 / rei(:,:) * 1.e6_pumas_r8
-    elsewhere
-      rei(:,:) = 25._pumas_r8
-    end where
-
-    effi(:ncol,:) = real(rei(:,:), kind_phys)
-
-    ! Ice effective diameter for radiation follows from the recomputed
-    ! effective radius.
-    dei(:ncol,:) = real(rei(:,:) * rhoi/rhows * 2._pumas_r8, kind_phys)
-
-    ! Droplet size distribution parameters for radiation are likewise recomputed
-    ! from the post-microphysics grid-mean in-cloud liquid.
-    ! Air density uses the temperature BEFORE the microphysics heating is applied
-    ! The original comment in CAM noted:
-    !   "State instead of state_loc to preserve answers for MG1 (and in any
-    !    case, it is unlikely to make much difference)."
-    ! PUMAS uses the total stratiform fraction for liquid cloud (liqcldf = ast)
-    rho(:,:)     = real(pmid(:ncol,:), pumas_r8) / &
-                (real(rair, pumas_r8) * real(temp(:ncol,:), pumas_r8))
-    icwmrst(:,:) = min(real(cldliq(:ncol,:), pumas_r8) / &
-                max(mincld, real(strat_cldfrc(:ncol,:), pumas_r8)), 0.005_pumas_r8)
-    ncic(:,:)   =    real(numliq(:ncol,:), pumas_r8) / &
-                max(mincld, real(strat_cldfrc(:ncol,:), pumas_r8))
-
-    mu(:,:)      = 0._pumas_r8
-    lambdac(:,:) = 0._pumas_r8
-    ! As for size_dist_param_basic above.
-    !$acc data copyin(mg_liq_props, icwmrst, rho) copy(ncic, mu, lambdac)
     do k = trop_cloud_top_lev, nlev
       call size_dist_param_liq(mg_liq_props, icwmrst(:,k), ncic(:,k), rho(:,k), &
                                mu(:,k), lambdac(:,k), ncol)
     end do
+
+    ! Outputs for radiation.
+    !$acc parallel loop gang vector collapse(2) private(dsout2, desm, dgout2)
+    do k = 1, nlev
+      do i = 1, ncol
+        if (icimrst(i,k) >= qsmall) then
+          rei(i,k) = 1.5_pumas_r8 / rei(i,k) * 1.e6_pumas_r8
+        else
+          rei(i,k) = 25._pumas_r8
+        end if
+
+        effi(i,k) = real(rei(i,k), kind_phys)
+
+        ! Ice effective diameter for radiation follows from the recomputed
+        ! effective radius.
+        dei(i,k) = real(rei(i,k) * rhoi/rhows * 2._pumas_r8, kind_phys)
+
+        ! size_dist_param_liq flags no-cloud points with mu = -100 and reset to zero.
+        if (k >= trop_cloud_top_lev .and. icwmrst(i,k) < qsmall) then
+          mu(i,k) = 0._pumas_r8
+        end if
+
+        pgam(i,k) = real(mu(i,k), kind_phys)
+        lamc(i,k) = real(lambdac(i,k), kind_phys)
+
+        ! Derive liquid effective radius for radiation from the recomputed size
+        ! distribution and overwrite the per-substep value from PUMAS.
+        ! 10 micron where there is no cloud.
+        rel(i,k) = 10._kind_phys
+        if (k >= trop_cloud_top_lev .and. icwmrst(i,k) >= qsmall) then
+          rel(i,k) = real((mu(i,k) + 3._pumas_r8) / &
+               lambdac(i,k)/2._pumas_r8 * 1.e6_pumas_r8, kind_phys)
+        end if
+
+        ! Snow effective diameter for radiation, from the post-microphysics grid-mean snow
+        dsout2 = 0._pumas_r8
+        desm   = 0._pumas_r8
+        if (k >= trop_cloud_top_lev .and. qs(i,k) >= 1.e-7_pumas_r8) then
+          dsout2 = avg_diameter(qs(i,k), ns(i,k) * rho(i,k), rho(i,k), rhosn)
+          desm = dsout2 * 3._pumas_r8 * rhosn/rhows
+        end if
+
+        des(i,k) = real(desm * 1.e6_pumas_r8, kind_phys)
+
+        ! Graupel effective diameter for radiation, from the post-microphysics grid-mean graupel
+        degrau(i,k) = 0._kind_phys
+        if (k >= trop_cloud_top_lev .and. qg(i,k) >= 1.e-7_pumas_r8) then
+          dgout2 = avg_diameter(qg(i,k), ng(i,k) * rho(i,k), rho(i,k), rhog)
+          degrau(i,k) = real(dgout2 * 3._pumas_r8 * rhog/rhows, kind_phys)
+        end if
+      end do
+    end do
+
     !$acc end data
-
-    ! size_dist_param_liq flags no-cloud points with mu = -100 and reset to zero.
-    where (icwmrst(:,trop_cloud_top_lev:) < qsmall)
-      mu(:,trop_cloud_top_lev:) = 0._pumas_r8
-    end where
-
-    pgam(:ncol,:) = real(mu(:,:), kind_phys)
-    lamc(:ncol,:) = real(lambdac(:,:), kind_phys)
-
-    ! Derive liquid effective radius for radiation from the recomputed size
-    ! distribution and overwrite the per-substep value from PUMAS.
-    ! 10 micron where there is no cloud.
-    rel(:ncol,:) = 10._kind_phys
-    where (icwmrst(:,trop_cloud_top_lev:) >= qsmall)
-      rel(:ncol,trop_cloud_top_lev:) = real((mu(:,trop_cloud_top_lev:) + 3._pumas_r8) / &
-           lambdac(:,trop_cloud_top_lev:)/2._pumas_r8 * 1.e6_pumas_r8, kind_phys)
-    end where
-
-    ! Snow effective diameter for radiation, from the post-microphysics grid-mean snow
-    qs(:,:) = real(snow(:ncol,:), pumas_r8)
-    ns(:,:) = real(numsnow(:ncol,:), pumas_r8)
-
-    dsout2(:,:) = 0._pumas_r8
-    desm(:,:)   = 0._pumas_r8
-    where (qs(:,trop_cloud_top_lev:) >= 1.e-7_pumas_r8)
-      dsout2(:,trop_cloud_top_lev:) = avg_diameter( &
-           qs(:,trop_cloud_top_lev:), &
-           ns(:,trop_cloud_top_lev:) * rho(:,trop_cloud_top_lev:), &
-           rho(:,trop_cloud_top_lev:), rhosn)
-      desm(:,trop_cloud_top_lev:) = dsout2(:,trop_cloud_top_lev:) * &
-           3._pumas_r8 * rhosn/rhows
-    end where
-
-    des(:ncol,:) = real(desm(:,:) * 1.e6_pumas_r8, kind_phys)
-
-    ! Graupel effective diameter for radiation, from the post-microphysics grid-mean graupel
-    qg(:,:) = real(graupel(:ncol,:), pumas_r8)
-    ng(:,:) = real(numgraup(:ncol,:), pumas_r8)
-
-    dgout2(:,:) = 0._pumas_r8
-    where (qg(:,trop_cloud_top_lev:) >= 1.e-7_pumas_r8)
-      dgout2(:,trop_cloud_top_lev:) = avg_diameter( &
-           qg(:,trop_cloud_top_lev:), &
-           ng(:,trop_cloud_top_lev:) * rho(:,trop_cloud_top_lev:), &
-           rho(:,trop_cloud_top_lev:), rhog)
-    end where
-
-    degrau(:ncol,:) = 0._kind_phys
-    where (qg(:,trop_cloud_top_lev:) >= 1.e-7_pumas_r8)
-      degrau(:ncol,trop_cloud_top_lev:) = real(dgout2(:,trop_cloud_top_lev:) * &
-           3._pumas_r8 * rhog/rhows, kind_phys)
-    end where
 
   end subroutine pumas_post_main_run
 
