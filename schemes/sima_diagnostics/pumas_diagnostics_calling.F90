@@ -45,6 +45,7 @@ CONTAINS
                                        errmsg, errflg)
 
       use cam_history, only: history_in_field
+      use micro_pumas_diags, only: proc_rates_type, proc_rates_on_host
 
       type (proc_rates_type), intent(inout)  :: proc_rates
 
@@ -124,11 +125,25 @@ CONTAINS
       real(kind_phys), intent(in) :: prer_evap(:,:)          ! evaporation rate of rain (kg/kg/s)
 
       ! CCPP error handling variables
-      character(len=512), intent(in) :: errmsg
-      integer,            intent(in) :: errflg
+      character(len=512), intent(out) :: errmsg
+      integer,            intent(out) :: errflg
 
       errmsg = ''
       errflg = 0
+
+      ! In a GPU build PUMAS keeps the process rates on the device only and
+      ! leaves their host copies unset (micro_pumas_diags,
+      ! proc_rates_on_host). Writing them to history from here would write
+      ! garbage without any error, so stop until the components that are
+      ! output are copied back to the host (!$acc update self, in
+      ! micro_pumas_ccpp_run before proc_rates_device_delete) and this
+      ! check is changed to match.
+      if (.not. proc_rates_on_host) then
+         errflg = 1
+         errmsg = 'pumas_diagnostics_run: the PUMAS process rates are on the device ' // &
+                  'only in a GPU build; copy them back before writing them to history'
+         return
+      end if
 
 !!!!!!!! DIAGNOSTIC CODE GOES HERE   !!!!!!!!!
 
