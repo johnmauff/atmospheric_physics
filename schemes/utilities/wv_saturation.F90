@@ -278,6 +278,7 @@ function svp_water(t) result(es)
 
   use wv_sat_methods, only: &
        wv_sat_svp_water
+  !$acc routine seq
 
   real(r8), intent(in)  :: t  ! Temperature (K)
   real(r8)              :: es ! SVP (Pa)
@@ -308,6 +309,7 @@ function svp_ice(t) result(es)
 
   use wv_sat_methods, only: &
        wv_sat_svp_ice
+  !$acc routine seq
 
   real(r8), intent(in)  :: t  ! Temperature (K)
   real(r8)              :: es ! SVP (Pa)
@@ -338,6 +340,7 @@ function svp_trans(t) result(es)
 
   use wv_sat_methods, only: &
        wv_sat_svp_trans
+  !$acc routine seq
 
   real(r8), intent(in)  :: t   ! Temperature (K)
   real(r8)              :: es  ! SVP (Pa)
@@ -370,6 +373,7 @@ end subroutine svp_trans_vect
 ! Does linear interpolation from nearest values found
 ! in the table (estbl).
 elemental function estblf(t) result(es)
+  !$acc routine seq
 
   real(r8), intent(in) :: t ! Temperature
   real(r8) :: es            ! SVP (Pa)
@@ -418,6 +422,7 @@ end subroutine estblf_vect
 ! Get enthalpy based only on temperature
 ! and specific humidity.
 elemental function tq_enthalpy(t, q, hltalt) result(enthalpy)
+  !$acc routine seq
 
   real(r8), intent(in) :: t      ! Temperature
   real(r8), intent(in) :: q      ! Specific humidity
@@ -459,6 +464,7 @@ end subroutine tq_enthalpy_vect
 !---------------------------------------------------------------------
 
 elemental subroutine no_ip_hltalt(t, hltalt)
+  !$acc routine seq
   !------------------------------------------------------------------!
   ! Purpose:                                                         !
   !   Calculate latent heat of vaporization of pure liquid water at  !
@@ -513,6 +519,7 @@ subroutine no_ip_hltalt_vect(t, hltalt, vlen)
 end subroutine no_ip_hltalt_vect
 
 elemental subroutine calc_hltalt(t, hltalt, tterm)
+  !$acc routine seq
   !------------------------------------------------------------------!
   ! Purpose:                                                         !
   !   Calculate latent heat of vaporization of water at a given      !
@@ -649,6 +656,7 @@ end subroutine calc_hltalt_vect
 ! Temperature derivative outputs, for qsat_*
 subroutine deriv_outputs_line(t, p, es, qs, hltalt, tterm, &
      gam, dqsdt)
+  !$acc routine seq
 
   ! Inputs
   real(r8), intent(in) :: t      ! Temperature
@@ -731,6 +739,7 @@ end subroutine deriv_outputs_vect
 !---------------------------------------------------------------------
 
 subroutine qsat_line(t, p, es, qs, gam, dqsdt, enthalpy)
+  !$acc routine seq
   !------------------------------------------------------------------!
   ! Purpose:                                                         !
   !   Look up and return saturation vapor pressure from precomputed  !
@@ -920,6 +929,7 @@ subroutine qsat_water_line(t, p, es, qs, gam, dqsdt, enthalpy)
   !------------------------------------------------------------------!
 
   use wv_sat_methods, only: wv_sat_qsat_water
+  !$acc routine seq
 
   ! Inputs
   real(r8), intent(in) :: t    ! Temperature
@@ -1092,6 +1102,7 @@ subroutine qsat_ice_line(t, p, es, qs, gam, dqsdt, enthalpy)
   !------------------------------------------------------------------!
 
   use wv_sat_methods, only: wv_sat_qsat_ice
+  !$acc routine seq
 
   ! Inputs
   real(r8), intent(in) :: t    ! Temperature
@@ -1320,6 +1331,7 @@ subroutine findsp_vc(q, t, p, use_ice, tsp, qsp, errmsg, errflg)
 end subroutine findsp_vc
 
 subroutine findsp (q, t, p, use_ice, tsp, qsp, status)
+  !$acc routine seq
 !-----------------------------------------------------------------------
 !
 ! Purpose:

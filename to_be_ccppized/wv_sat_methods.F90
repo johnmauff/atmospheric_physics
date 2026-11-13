@@ -55,6 +55,8 @@ integer, parameter :: initial_default_idx = GoffGratch_idx
 integer :: default_idx = initial_default_idx
 
 !$acc declare create (epsilo, tmelt, tboil, omeps, h2otrip, ttrice)
+! The selected method, read by the scalar SVP functions on the device.
+!$acc declare create (default_idx)
 
 public wv_sat_methods_init
 public wv_sat_get_scheme_idx
@@ -162,7 +164,10 @@ function wv_sat_set_default(name) result(status)
 
   status = wv_sat_valid_idx(tmp_idx)
 
-  if (status) default_idx = tmp_idx
+  if (status) then
+     default_idx = tmp_idx
+     !$acc update device (default_idx)
+  end if
 
 end function wv_sat_set_default
 
@@ -173,6 +178,7 @@ end function wv_sat_set_default
 subroutine wv_sat_reset_default()
 
   default_idx = initial_default_idx
+  !$acc update device (default_idx)
 
 end subroutine wv_sat_reset_default
 
@@ -183,6 +189,7 @@ end subroutine wv_sat_reset_default
 ! Get saturation specific humidity given pressure and SVP.
 ! Specific humidity is limited to range 0-1.
 function wv_sat_svp_to_qsat(es, p) result(qs)
+  !$acc routine seq
   real(r8), intent(in) :: es  ! SVP
   real(r8), intent(in) :: p   ! Current pressure.
   real(r8)             :: qs
@@ -225,6 +232,7 @@ subroutine  wv_sat_svp_to_qsat_vect(es, p, qs, vlen)
 end subroutine wv_sat_svp_to_qsat_vect
 
 subroutine wv_sat_qsat_water(t, p, es, qs, idx)
+  !$acc routine seq
   !------------------------------------------------------------------!
   ! Purpose:                                                         !
   !   Calculate SVP over water at a given temperature, and then      !
@@ -284,6 +292,7 @@ subroutine wv_sat_qsat_water_vect(t, p, es, qs, vlen, idx)
 end subroutine wv_sat_qsat_water_vect
 
 subroutine wv_sat_qsat_ice(t, p, es, qs, idx)
+  !$acc routine seq
   !------------------------------------------------------------------!
   ! Purpose:                                                         !
   !   Calculate SVP over ice at a given temperature, and then        !
@@ -343,6 +352,7 @@ subroutine wv_sat_qsat_ice_vect(t, p, es, qs, vlen, idx)
 end subroutine wv_sat_qsat_ice_vect
 
 subroutine wv_sat_qsat_trans(t, p, es, qs, idx)
+  !$acc routine seq
   !------------------------------------------------------------------!
   ! Purpose:                                                         !
   !   Calculate SVP over ice at a given temperature, and then        !
@@ -372,6 +382,7 @@ end subroutine wv_sat_qsat_trans
 !---------------------------------------------------------------------
 
 function wv_sat_svp_water(t, idx) result(es)
+  !$acc routine seq
   real(r8), intent(in) :: t
   integer,  intent(in), optional :: idx
   real(r8)             :: es
@@ -424,6 +435,7 @@ subroutine  wv_sat_svp_water_vect(t, es, vlen, idx)
 end subroutine wv_sat_svp_water_vect
 
 function wv_sat_svp_ice(t, idx) result(es)
+  !$acc routine seq
   real(r8), intent(in)  :: t
   integer,  intent(in), optional :: idx
   real(r8)              :: es
@@ -477,6 +489,7 @@ subroutine wv_sat_svp_ice_vect(t, es, vlen, idx)
 end subroutine wv_sat_svp_ice_vect
 
 function wv_sat_svp_trans(t, idx) result(es)
+  !$acc routine seq
 
   real(r8), intent(in) :: t
   integer,  intent(in), optional :: idx
@@ -567,6 +580,7 @@ end subroutine wv_sat_svp_trans_vect
 ! Goff & Gratch (1946)
 
 function GoffGratch_svp_water(t) result(es)
+  !$acc routine seq
   real(r8), intent(in) :: t  ! Temperature in Kelvin
   real(r8) :: es             ! SVP in Pa
 
@@ -609,6 +623,7 @@ subroutine GoffGratch_svp_water_vect(t, es, vlen)
 end subroutine GoffGratch_svp_water_vect
 
 function GoffGratch_svp_ice(t) result(es)
+  !$acc routine seq
   real(r8), intent(in) :: t  ! Temperature in Kelvin
   real(r8) :: es             ! SVP in Pa
 
@@ -644,6 +659,7 @@ end subroutine GoffGratch_svp_ice_vect
 ! Murphy & Koop (2005)
 
 function MurphyKoop_svp_water(t) result(es)
+  !$acc routine seq
   real(r8), intent(in) :: t  ! Temperature in Kelvin
   real(r8) :: es             ! SVP in Pa
 
@@ -682,6 +698,7 @@ subroutine MurphyKoop_svp_water_vect(t, es, vlen)
 end subroutine MurphyKoop_svp_water_vect
 
 function MurphyKoop_svp_ice(t) result(es)
+  !$acc routine seq
   real(r8), intent(in) :: t  ! Temperature in Kelvin
   real(r8) :: es             ! SVP in Pa
 
@@ -722,6 +739,7 @@ end subroutine MurphyKoop_svp_ice_vect
 ! takes Kelvin and internally converts.
 
 function Bolton_svp_water(t) result(es)
+  !$acc routine seq
   real(r8),parameter :: c1 = 611.2_r8
   real(r8),parameter :: c2 = 17.67_r8
   real(r8),parameter :: c3 = 243.5_r8
