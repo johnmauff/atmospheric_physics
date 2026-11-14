@@ -114,7 +114,7 @@ contains
           end do
        end if
 
-       errmsg = gas_concs%gas_concs%set_vmr(gaslist(gas_idx), gas_vmr)
+       errmsg = gas_concs%set_vmr(gaslist(gas_idx), gas_vmr)
        if (len_trim(errmsg) > 0) then
           errflg = 1
           return

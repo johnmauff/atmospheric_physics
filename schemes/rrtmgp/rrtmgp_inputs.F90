@@ -273,7 +273,7 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
      ! If no daylight columns, can't create empty RRTMGP objects
      if (dosw .and. nday > 0) then
         ! Initialize object for gas concentrations.
-        errmsg = gas_concs_sw%gas_concs%init(gaslist_lc)
+        errmsg = gas_concs_sw%init(gaslist_lc)
         if (len_trim(errmsg) > 0) then
            errflg = 1
            return
@@ -298,7 +298,7 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
 
      if (dolw) then
         ! Initialize object for gas concentrations
-        errmsg = gas_concs_lw%gas_concs%init(gaslist_lc)
+        errmsg = gas_concs_lw%init(gaslist_lc)
         if (len_trim(errmsg) > 0) then
            errflg = 1
            return

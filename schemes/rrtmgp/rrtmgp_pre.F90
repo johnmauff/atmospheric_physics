@@ -36,7 +36,7 @@ CONTAINS
         gaslist_lc(idx) = to_lower(gaslist(idx))
      end do
 
-     errmsg = available_gases%gas_concs%init(gaslist_lc)
+     errmsg = available_gases%init(gaslist_lc)
      if (len_trim(errmsg) /= 0) then
         errflg = 1
      end if

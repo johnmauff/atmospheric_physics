@@ -2,6 +2,7 @@
   name = ty_gas_concs_ccpp
   type = ddt
   dependencies = ../ext/gas-optics/mo_gas_concentrations.F90
+  dependencies = ../ext/rte-kernels/mo_rte_kind.F90
 
 [ccpp-arg-table]
   name = ty_gas_concs_ccpp

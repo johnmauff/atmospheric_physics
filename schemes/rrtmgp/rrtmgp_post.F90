@@ -76,7 +76,7 @@ subroutine rrtmgp_post_run(nlay, dolw, qrs_prime, qrl_prime, fsns, pdel, atm_opt
    ! Free the gas concentrations here, like the other objects: rrtmgp_inputs
    ! takes them intent(out), and the compiler's deallocation on entry need not
    ! run RRTMGP's finalizer, leaving their OpenACC device copies behind.
-   call gas_concs_sw%gas_concs%reset()
+   call gas_concs_sw%reset()
 
    call sources_lw%sources%finalize()
    call free_optics_lw(atm_optics_lw, errmsg, errflg)
@@ -93,7 +93,7 @@ subroutine rrtmgp_post_run(nlay, dolw, qrs_prime, qrl_prime, fsns, pdel, atm_opt
    end if
    call free_fluxes_byband(flw)
    call free_fluxes_broadband(flwc)
-   call gas_concs_lw%gas_concs%reset()
+   call gas_concs_lw%reset()
 
 end subroutine rrtmgp_post_run
 
