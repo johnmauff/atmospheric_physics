@@ -1,6 +1,7 @@
 [ccpp-table-properties]
   name = rrtmgp_lw_diagnostics
   type = scheme
+  dependencies = ../../phys_utils/atmos_phys_interp_utils.F90
 
 [ccpp-arg-table]
   name  = rrtmgp_lw_diagnostics_init

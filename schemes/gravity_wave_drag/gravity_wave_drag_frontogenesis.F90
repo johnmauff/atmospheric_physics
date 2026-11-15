@@ -720,6 +720,10 @@ contains
     ! and direction (unit vector).
     src_level = desc%ksrc
     tend_level = desc%ksrc
+    ! Only the levels down to the source level are set below; the rest are
+    ! not used, but are defined at return.
+    ubm = 0._kind_phys
+    ubi = 0._kind_phys
     usrc = 0.5_kind_phys*(u(:, desc%ksrc + 1) + u(:, desc%ksrc))
     vsrc = 0.5_kind_phys*(v(:, desc%ksrc + 1) + v(:, desc%ksrc))
 

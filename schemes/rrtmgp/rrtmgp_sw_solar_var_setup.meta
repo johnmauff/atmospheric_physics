@@ -2,6 +2,7 @@
   name = rrtmgp_sw_solar_var_setup
   type = scheme
   dependencies = utils/radiation_utils.F90
+  dependencies = ../../phys_utils/atmos_phys_interp_utils.F90
 
 [ccpp-arg-table]
   name  = rrtmgp_sw_solar_var_setup_init

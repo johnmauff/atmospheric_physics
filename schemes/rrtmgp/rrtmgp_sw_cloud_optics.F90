@@ -167,7 +167,8 @@ subroutine rrtmgp_sw_cloud_optics_run(dosw, ncol, pver, ktopcam, ktoprad,  nswgp
       call ec_ice_optics_sw(ncol, pver, nswbands, cld, rei, iciwpth, ice_tau, ice_tau_w, ice_tau_w_g, sw_tau_w_f, errmsg, errflg)
    case ('mitchell')
       ! Mitchell ice optics
-      call interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, asm_sw_ice, ssa_sw_ice, iciwpth, dei, g_d_eff, ice_tau, ice_tau_w, ice_tau_w_g, sw_tau_w_f)
+      call interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, asm_sw_ice, ssa_sw_ice, iciwpth, dei, g_d_eff, &
+           ice_tau, ice_tau_w, ice_tau_w_g, sw_tau_w_f, errmsg, errflg)
    case default
       write(errmsg,'(a,a)') sub, ': ice_cld_optics must be either ebertcurry or mitchell'
       errflg = 1
@@ -182,7 +183,11 @@ subroutine rrtmgp_sw_cloud_optics_run(dosw, ncol, pver, ktopcam, ktoprad,  nswgp
 
    ! add in snow
    if (do_snow) then
-      call interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, asm_sw_ice, ssa_sw_ice, icswpth, des, g_d_eff, snow_tau, snow_tau_w, snow_tau_w_g, sw_tau_w_f)
+      call interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, asm_sw_ice, ssa_sw_ice, icswpth, des, g_d_eff, &
+           snow_tau, snow_tau_w, snow_tau_w_g, sw_tau_w_f, errmsg, errflg)
+      if (errflg /= 0) then
+         return
+      end if
       do i = 1, ncol
          do k = 1, pver
             if (cldfprime(i,k) > 0._kind_phys) then
@@ -207,7 +212,11 @@ subroutine rrtmgp_sw_cloud_optics_run(dosw, ncol, pver, ktopcam, ktoprad,  nswgp
 
    ! add in graupel
    if (do_graupel) then
-      call get_grau_optics_sw(ncol, pver, nswbands, tiny_in, g_d_eff, ext_sw_ice, asm_sw_ice, ssa_sw_ice, iulog, icgrauwpth, degrau, idx_sw_diag, grau_tau, grau_tau_w, grau_tau_w_g, sw_tau_w_f)
+      call get_grau_optics_sw(ncol, pver, nswbands, tiny_in, g_d_eff, ext_sw_ice, asm_sw_ice, ssa_sw_ice, iulog, icgrauwpth, &
+           degrau, idx_sw_diag, grau_tau, grau_tau_w, grau_tau_w_g, sw_tau_w_f, errmsg, errflg)
+      if (errflg /= 0) then
+         return
+      end if
       do i = 1, ncol
          do k = 1, pver
             if (cldfprime(i,k) > 0._kind_phys) then
@@ -278,7 +287,7 @@ end subroutine rrtmgp_sw_cloud_optics_run
 !==============================================================================
 
 subroutine get_grau_optics_sw(ncol, pver, nswbands, tiny_in, g_d_eff, ext_sw_ice, asm_sw_ice, ssa_sw_ice, &
-                iulog, icgrauwpth, degrau, idx_sw_diag, tau, tau_w, tau_w_g, tau_w_f)
+                iulog, icgrauwpth, degrau, idx_sw_diag, tau, tau_w, tau_w_g, tau_w_f, errmsg, errflg)
    use ccpp_kinds,                only: kind_phys
 
    integer, intent(in)  :: ncol
@@ -298,13 +307,18 @@ subroutine get_grau_optics_sw(ncol, pver, nswbands, tiny_in, g_d_eff, ext_sw_ice
    real(kind_phys),intent(out) :: tau_w  (:,:,:) ! single scattering albedo * tau
    real(kind_phys),intent(out) :: tau_w_g(:,:,:) ! asymmetry parameter * tau * w
    real(kind_phys),intent(out) :: tau_w_f(:,:,:) ! forward scattered fraction * tau * w
+   character(len=*), intent(out) :: errmsg
+   integer,          intent(out) :: errflg
 
    integer :: i,k
 
    ! This does the same thing as get_ice_optics_sw, except with a different
    ! water path and effective diameter.
    call interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, asm_sw_ice, ssa_sw_ice, icgrauwpth, degrau, g_d_eff, tau, tau_w, &
-        tau_w_g, tau_w_f)
+        tau_w_g, tau_w_f, errmsg, errflg)
+   if (errflg /= 0) then
+      return
+   end if
    do i = 1, ncol
       do k = 1, pver
          if (tau(idx_sw_diag,i,k).gt.100._kind_phys) then
@@ -365,10 +379,9 @@ end subroutine get_liquid_optics_sw
 !==============================================================================
 
 subroutine interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, asm_sw_ice, ssa_sw_ice, &
-     iciwpth, dei, g_d_eff, tau, tau_w, tau_w_g, tau_w_f)
-  use ccpp_kinds,       only: kind_phys
-  ! SIMA-specific interpolation routines
-  use interpolate_data, only: interp_type, lininterp, lininterp_init, lininterp_finish, extrap_method_bndry
+     iciwpth, dei, g_d_eff, tau, tau_w, tau_w_g, tau_w_f, errmsg, errflg)
+  use ccpp_kinds,              only: kind_phys
+  use atmos_phys_interp_utils, only: interp_type, lininterp, lininterp_init, lininterp_finish, extrap_method_bndry
 
   integer, intent(in) :: ncol
   integer, intent(in) :: pver
@@ -385,6 +398,8 @@ subroutine interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, 
   real(kind_phys),intent(out) :: tau_w  (:,:,:) ! single scattering albedo * tau
   real(kind_phys),intent(out) :: tau_w_g(:,:,:) ! asymmetry parameter * tau * w
   real(kind_phys),intent(out) :: tau_w_f(:,:,:) ! forward scattered fraction * tau * w
+  character(len=*), intent(out) :: errmsg
+  integer,          intent(out) :: errflg
 
   type(interp_type) :: dei_wgts
 
@@ -392,6 +407,8 @@ subroutine interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, 
   integer :: n_g_d
   real(kind_phys) :: ext(nswbands), ssa(nswbands), asm(nswbands)
 
+  errmsg = ''
+  errflg = 0
   n_g_d = size(g_d_eff)
 
   do k = 1,pver
@@ -405,7 +422,10 @@ subroutine interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, 
         else
            ! for each cell interpolate to find weights in g_d_eff grid.
            call lininterp_init(g_d_eff, n_g_d, dei(i:i,k), 1, &
-                extrap_method_bndry, dei_wgts)
+                extrap_method_bndry, dei_wgts, errmsg=errmsg, errflg=errflg)
+           if (errflg /= 0) then
+              return
+           end if
            ! interpolate into grid and extract radiative properties
            do swband = 1, nswbands
               call lininterp(ext_sw_ice(:,swband), n_g_d, &
@@ -429,8 +449,7 @@ end subroutine interpolate_ice_optics_sw
 !==============================================================================
 
 subroutine gam_liquid_sw(nswbands, tiny_in, g_lambda, g_mu, ext_sw_liq, asm_sw_liq, ssa_sw_liq, clwptn, lamc, pgam, tau, tau_w, tau_w_g, tau_w_f, errmsg, errflg)
-  ! SIMA-specific interpolation routines
-  use interpolate_data,          only: interp_type, lininterp, lininterp_finish
+  use atmos_phys_interp_utils,   only: interp_type, lininterp, lininterp_finish
   use radiation_utils,           only: get_mu_lambda_weights_ccpp
   use rrtmgp_cloud_optics_setup, only: nmu, nlambda
   use ccpp_kinds,                only: kind_phys

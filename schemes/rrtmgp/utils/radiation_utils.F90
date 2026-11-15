@@ -89,6 +89,8 @@ contains
 
    if (.not. wavenumber_boundaries_set) then
       write(errmsg,'(a,a)') sub, ': ERROR, wavenumber boundaries not set.'
+      errflg = 1
+      return
    end if
 
    select case (units)
@@ -135,6 +137,8 @@ subroutine get_lw_spectral_boundaries_ccpp(low_boundaries, high_boundaries, unit
 
    if (.not. wavenumber_boundaries_set) then
       write(errmsg,'(a,a)') sub, ': ERROR, wavenumber boundaries not set.'
+      errflg = 1
+      return
    end if
 
    select case (units)
@@ -164,8 +168,8 @@ end subroutine get_lw_spectral_boundaries_ccpp
 
 subroutine get_mu_lambda_weights_ccpp(nmu, nlambda, g_mu, g_lambda, lamc, pgam, &
                 mu_wgts, lambda_wgts, errmsg, errflg)
-  use interpolate_data, only: interp_type, lininterp_init, lininterp, &
-                              extrap_method_bndry
+  use atmos_phys_interp_utils, only: interp_type, lininterp_init, lininterp, &
+                                     extrap_method_bndry
   ! Get mu and lambda interpolation weights
   integer,            intent(in) :: nmu            ! number of mu values
   integer,            intent(in) :: nlambda        ! number of lambda values
@@ -188,7 +192,9 @@ subroutine get_mu_lambda_weights_ccpp(nmu, nlambda, g_mu, g_lambda, lamc, pgam, 
 
   ! Make interpolation weights for mu.
   ! (Put pgam in a temporary array for this purpose.)
-  call lininterp_init(g_mu, nmu, [pgam], 1, extrap_method_bndry, mu_wgts)
+  call lininterp_init(g_mu, nmu, [pgam], 1, extrap_method_bndry, mu_wgts, &
+       errmsg=errmsg, errflg=errflg)
+  if (errflg /= 0) return
 
   ! Use mu weights to interpolate to a row in the lambda table.
   do ilambda = 1, nlambda
@@ -198,7 +204,7 @@ subroutine get_mu_lambda_weights_ccpp(nmu, nlambda, g_mu, g_lambda, lamc, pgam, 
 
   ! Make interpolation weights for lambda.
   call lininterp_init(g_lambda_interp, nlambda, [lamc], 1, &
-       extrap_method_bndry, lambda_wgts)
+       extrap_method_bndry, lambda_wgts, errmsg=errmsg, errflg=errflg)
 
 end subroutine get_mu_lambda_weights_ccpp
 

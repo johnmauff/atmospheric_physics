@@ -161,8 +161,7 @@ contains
              prndl_in, qbo_hdepth_scaling_in, &
              errmsg, errflg)
 
-    ! Host model dependency for interpolation.
-    use interpolate_data, only: lininterp
+    use atmos_phys_interp_utils, only: lininterp
 
     integer,          intent(in)  :: pver_in
     integer,          intent(in)  :: pverp_in
@@ -255,7 +254,11 @@ contains
       palph(k) = palph(k)*1.e2_kind_phys
     end do
 
-    call lininterp(alpha0, palph, nalph, alpha, pref_edge, pver + 1)
+    call lininterp(alpha0, palph, nalph, alpha, pref_edge, pver + 1, errmsg, errflg)
+    if (errflg /= 0) then
+      errmsg = 'gravity_wave_drag_common_init: ' // trim(errmsg)
+      return
+    end if
 
     if (amIRoot) then
       write (iulog, *) 'gravity_wave_drag_common_init: newtonian damping (1/day):'

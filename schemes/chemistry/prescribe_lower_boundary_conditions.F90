@@ -23,8 +23,8 @@ module prescribe_lower_boundary_conditions
   use ccpp_kinds,     only: kind_phys
   use ccpp_io_reader, only: abstract_netcdf_reader_t
 
-  ! Host model dependency for interpolation:
-  use interpolate_data, only: interp_type
+  ! portable interpolation
+  use atmos_phys_interp_utils, only: interp_type
 
   implicit none
   private
@@ -119,8 +119,8 @@ contains
     ! portable netCDF reader for the dataset
     use ccpp_io_reader, only: create_netcdf_reader_t
 
-    ! Host model dependency for interpolation:
-    use interpolate_data, only: lininterp_init
+    ! portable interpolation
+    use atmos_phys_interp_utils, only: lininterp_init
 
     ! portable dependencies
     use atmos_phys_string_utils, only: to_upper
@@ -363,7 +363,11 @@ contains
     d2r = pi_const/180._kind_phys
     file_lat(:nlat) = file_lat(:nlat)*d2r
 
-    call lininterp_init(file_lat, nlat, lat, ncol, 1, lat_wgts)
+    call lininterp_init(file_lat, nlat, lat, ncol, 1, lat_wgts, errmsg=errmsg, errflg=errflg)
+    if (errflg /= 0) then
+      errmsg = subname // ': latitude weights for "' // trim(filename) // '": ' // trim(errmsg)
+      return
+    end if
     lat_wgts_built = .true.
 
     ! Read in the flbc vmr for the current time window
@@ -467,8 +471,8 @@ contains
 !! \htmlinclude prescribe_lower_boundary_conditions_final.html
   subroutine prescribe_lower_boundary_conditions_final(errmsg, errflg)
 
-    ! Host model dependency for interpolation:
-    use interpolate_data, only: lininterp_finish
+    ! portable interpolation
+    use atmos_phys_interp_utils, only: lininterp_finish
 
     character(len=*),   intent(out)   :: errmsg
     integer,            intent(out)   :: errflg
@@ -513,8 +517,8 @@ contains
   ! interpolate horizontally to the physics columns.
   subroutine flbc_get(lbcs, ncol, to_lats, to_lons, errmsg, errflg)
 
-    ! Host model dependency for interpolation:
-    use interpolate_data, only: lininterp_init, lininterp
+    ! portable interpolation
+    use atmos_phys_interp_utils, only: lininterp_init, lininterp
 
     type(flbc),        intent(inout) :: lbcs
     integer,           intent(in)    :: ncol
@@ -581,7 +585,12 @@ contains
         nlon = size(lon)
         lon(:nlon) = lon(:nlon)*d2r
 
-        call lininterp_init(lon, nlon, to_lons, ncol, 2, lon_wgts, zero, twopi)
+        call lininterp_init(lon, nlon, to_lons, ncol, 2, lon_wgts, zero, twopi, errmsg, errflg)
+        if (errflg /= 0) then
+          errmsg = 'prescribe_lower_boundary_conditions (flbc_get): longitude weights for "' // &
+                   trim(filename) // '": ' // trim(errmsg)
+          return
+        end if
         lon_wgts_built = .true.
       end if
 

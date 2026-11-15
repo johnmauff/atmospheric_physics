@@ -228,7 +228,10 @@ contains
        !----------------------------------------------------------------------------
        ! calculate shear
 
-       call mcsp_calculate_shear(ncol, pver, pmid, u, mcsp_shear)
+       call mcsp_calculate_shear(ncol, pver, pmid, u, mcsp_shear, errmsg, errflg)
+       if (errflg /= 0) then
+          return
+       end if
 
        !----------------------------------------------------------------------------
        ! calculate mass weighted column average tendencies from deep convection
@@ -352,21 +355,26 @@ contains
   ! Low-level zonal wind shear between the storm reference pressure level and the
   ! lowest model layer. Columns whose lowest layer is above the reference level get
   ! shear_undefined.
-  subroutine mcsp_calculate_shear(ncol, pver, pmid, u, mcsp_shear)
-    ! Host model dependency for interpolation
-    use interpolate_data, only: vertinterp
+  subroutine mcsp_calculate_shear(ncol, pver, pmid, u, mcsp_shear, errmsg, errflg)
+    use atmos_phys_interp_utils, only: vertinterp
 
     integer,         intent(in)  :: ncol
     integer,         intent(in)  :: pver
     real(kind_phys), intent(in)  :: pmid(:,:)      ! mid-point pressure [Pa]
     real(kind_phys), intent(in)  :: u(:,:)         ! zonal wind [m s-1]
     real(kind_phys), intent(out) :: mcsp_shear(:)  ! low-level zonal wind shear [m s-1]
+    character(len=*), intent(out) :: errmsg
+    integer,          intent(out) :: errflg
 
     integer         :: i
     real(kind_phys) :: storm_u(ncol)  ! zonal wind at the storm reference pressure level [m s-1]
 
     ! Interpolate wind to pressure level specified by storm_speed_pref
-    call vertinterp(ncol, ncol, pver, pmid, storm_speed_pref, u, storm_u)
+    call vertinterp(ncol, ncol, pver, pmid, storm_speed_pref, u, storm_u, errmsg, errflg)
+    if (errflg /= 0) then
+       errmsg = 'mcsp_calculate_shear: ' // trim(errmsg)
+       return
+    end if
 
     ! calculate low-level shear
     do i = 1, ncol

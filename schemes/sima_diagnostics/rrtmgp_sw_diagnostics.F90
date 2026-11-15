@@ -75,7 +75,7 @@ CONTAINS
       use cam_history,        only: history_out_field
       use ccpp_fluxes,        only: ty_fluxes_broadband_ccpp
       use ccpp_fluxes_byband, only: ty_fluxes_byband_ccpp
-      use interpolate_data,   only: vertinterp
+      use atmos_phys_interp_utils, only: vertinterp
       !------------------------------------------------
       !   Input / output parameters
       !------------------------------------------------
@@ -192,13 +192,22 @@ CONTAINS
       call history_out_field('FSUTOA'//diag(diag_index),  fsutoa)
 
       ! Output fluxes at 200 mb
-      call vertinterp(ncol, ncol, pverp, pint, 20000._kind_phys, fns,  fsn200)
-      call vertinterp(ncol, ncol, pverp, pint, 20000._kind_phys, fcns, fsn200c)
+      call vertinterp(ncol, ncol, pverp, pint, 20000._kind_phys, fns,  fsn200, errmsg, errflg)
+      if (errflg /= 0) then
+         return
+      end if
+      call vertinterp(ncol, ncol, pverp, pint, 20000._kind_phys, fcns, fsn200c, errmsg, errflg)
+      if (errflg /= 0) then
+         return
+      end if
       call history_out_field('FSN200'//diag(diag_index),  fsn200)
       call history_out_field('FSN200C'//diag(diag_index), fsn200c)
 
       do idx = 1,ncol
-         call vertinterp(1, 1, pverp, pint(idx,:), p_trop(idx), fns(idx,:), fsnr(idx))
+         call vertinterp(1, 1, pverp, pint(idx,:), p_trop(idx), fns(idx,:), fsnr(idx), errmsg, errflg)
+         if (errflg /= 0) then
+            return
+         end if
       end do
       call history_out_field('FSNR'//diag(diag_index),    fsnr)
 

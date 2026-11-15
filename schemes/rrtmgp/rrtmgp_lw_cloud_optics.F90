@@ -144,6 +144,7 @@ contains
           end do
        end do
     else
+       snow_lw_abs(:,:,:) = 0._kind_phys
        c_cld_lw_abs(:,:,:) = cld_lw_abs(:,:,:)
     end if
 
@@ -164,6 +165,8 @@ contains
              end if
           end do
        end do
+    else
+       grau_lw_abs(:,:,:) = 0._kind_phys
     end if
 
     errmsg =cloud_lw%optical_props%alloc_1scl(ncol, nlay, kdist_lw%gas_props)
@@ -171,6 +174,8 @@ contains
        errflg = 1
        return
     end if
+    ! Defined at return; rrtmgp_lw_mcica_subcol_gen fills it.
+    cloud_lw%optical_props%tau = 0._kind_phys
 
   end subroutine rrtmgp_lw_cloud_optics_run
 
@@ -221,7 +226,7 @@ contains
 !==============================================================================
 
   subroutine gam_liquid_lw(nlwbands, nmu, nlambda, clwptn, lamc, pgam, abs_lw_liq, g_mu, g_lambda, tiny, abs_od, errmsg, errflg)
-    use interpolate_data,         only: interp_type, lininterp, lininterp_finish
+    use atmos_phys_interp_utils,  only: interp_type, lininterp, lininterp_finish
     use radiation_utils,          only: get_mu_lambda_weights_ccpp
     use ccpp_kinds,               only: kind_phys
     ! Inputs
@@ -271,7 +276,7 @@ contains
 
   subroutine interpolate_ice_optics_lw(ncol, pver, nlwbands, iciwpth, dei, &
                   n_g_d, g_d_eff, abs_lw_ice, tiny, abs_od, errmsg, errflg)
-    use interpolate_data,         only: interp_type, lininterp, lininterp_init, &
+    use atmos_phys_interp_utils,  only: interp_type, lininterp, lininterp_init, &
                                         lininterp_finish, extrap_method_bndry
     use ccpp_kinds,               only: kind_phys
 
@@ -305,7 +310,10 @@ contains
           else
              ! for each cell interpolate to find weights in g_d_eff grid.
              call lininterp_init(g_d_eff, n_g_d, dei(idx:idx,kdx), 1, &
-                  extrap_method_bndry, dei_wgts)
+                  extrap_method_bndry, dei_wgts, errmsg=errmsg, errflg=errflg)
+             if (errflg /= 0) then
+                return
+             end if
              ! interpolate into grid and extract radiative properties
              do lwband = 1, nlwbands
                 call lininterp(abs_lw_ice(:,lwband), n_g_d, &

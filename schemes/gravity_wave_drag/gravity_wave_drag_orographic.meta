@@ -2,6 +2,7 @@
   name = gravity_wave_drag_orographic
   type = scheme
   dependencies = gw_utils.F90,gw_common.F90,../../to_be_ccppized/coords_1d.F90
+  dependencies = ../../phys_utils/atmos_phys_interp_utils.F90
 
 [ccpp-arg-table]
   name  = gravity_wave_drag_orographic_init
