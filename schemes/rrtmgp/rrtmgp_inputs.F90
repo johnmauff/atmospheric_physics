@@ -286,6 +286,10 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
            errflg = 1
            return
         end if
+        ! Allocation leaves the values undefined; define them.
+        atm_optics_sw%optical_props%tau(:,:,:) = 0._kind_phys
+        atm_optics_sw%optical_props%ssa(:,:,:) = 0._kind_phys
+        atm_optics_sw%optical_props%g(:,:,:)   = 0._kind_phys
 
         ! Initialize object for SW aerosol optics.  Allocates arrays
         ! for properties represented by band.
@@ -294,6 +298,9 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
            errflg = 1
            return
         end if
+        aer_sw%optical_props%tau(:,:,:) = 0._kind_phys
+        aer_sw%optical_props%ssa(:,:,:) = 0._kind_phys
+        aer_sw%optical_props%g(:,:,:)   = 0._kind_phys
      end if
 
      if (dolw) then
@@ -310,6 +317,8 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
            errflg = 1
            return
         end if
+        ! Allocation leaves the values undefined; define them.
+        atm_optics_lw%optical_props%tau(:,:,:) = 0._kind_phys
 
         ! Initialize object for LW aerosol optics.
         errmsg = aer_lw%optical_props%alloc_1scl(ncol, nlay, kdist_lw%gas_props%get_band_lims_wavenumber())
@@ -317,6 +326,7 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
            errflg = 1
            return
         end if
+        aer_lw%optical_props%tau(:,:,:) = 0._kind_phys
 
         ! Initialize object for Planck sources.
         errmsg = sources_lw%sources%alloc(ncol, nlay, kdist_lw%gas_props)
@@ -324,6 +334,10 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
            errflg = 1
            return
         end if
+        sources_lw%sources%lay_source(:,:,:)   = 0._kind_phys
+        sources_lw%sources%lev_source(:,:,:)   = 0._kind_phys
+        sources_lw%sources%sfc_source(:,:)     = 0._kind_phys
+        sources_lw%sources%sfc_source_Jac(:,:) = 0._kind_phys
      end if
 
   end subroutine rrtmgp_inputs_run

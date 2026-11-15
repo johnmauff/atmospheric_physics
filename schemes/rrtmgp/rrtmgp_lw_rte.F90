@@ -70,6 +70,14 @@ contains
     !$acc             flux_allsky%fluxes%flux_up, flux_allsky%fluxes%flux_dn,    &
     !$acc             lw_Ds)
 
+    ! lw_Ds is computed only with optimal angles; otherwise define it
+    ! (0: no angle, which RTE would reject, as angles must be >= 1).
+    if (.not. use_lw_optimal_angles) then
+       !$acc kernels
+       lw_Ds(:,:) = 0._kind_phys
+       !$acc end kernels
+    end if
+
     ! ###################################################################################
     !
     ! Compute clear-sky fluxes (gaseous+aerosol) (optional)
