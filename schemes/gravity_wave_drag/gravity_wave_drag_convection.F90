@@ -812,6 +812,9 @@ contains
     uconv = u(:, desc%k)
     vconv = v(:, desc%k)
 
+    ! The bottom interface is not set below (unused), but is defined at return.
+    ubi = 0._kind_phys
+
     ! Get the unit vector components and magnitude at the source level.
     call get_unit_vector(uconv, vconv, xv, yv, ubi(:, desc%k + 1))
 
