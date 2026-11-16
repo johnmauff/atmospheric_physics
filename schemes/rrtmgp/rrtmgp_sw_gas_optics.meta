@@ -77,18 +77,21 @@
   type = real | kind = kind_phys
   dimensions = (daytime_columns_dimension, number_of_vertical_layers_in_RRTMGP)
   intent = in
+  memory_space = device
 [ p_lev ]
   standard_name = air_pressure_at_interface_for_daytime_columns_for_RRTMGP
   units = Pa
   type = real | kind = kind_phys
   dimensions = (daytime_columns_dimension, number_of_vertical_interfaces_in_RRTMGP)
   intent = in
+  memory_space = device
 [ t_lay ]
   standard_name = air_temperature_for_daytime_columns_for_RRTMGP
   units = K
   type = real | kind = kind_phys
   dimensions = (daytime_columns_dimension, number_of_vertical_layers_in_RRTMGP)
   intent = in
+  memory_space = device
 [ gas_concs ]
   standard_name = shortwave_gas_volume_mixing_ratios_object_for_RRTMGP
   units = none
@@ -113,6 +116,7 @@
   type = real | kind = kind_phys
   dimensions = (daytime_columns_dimension, number_of_shortwave_g_point_intervals)
   intent = out
+  memory_space = device
 [ errmsg ]
   standard_name = ccpp_error_message
   units = none

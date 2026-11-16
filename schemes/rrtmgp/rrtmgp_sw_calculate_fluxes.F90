@@ -49,9 +49,8 @@ CONTAINS
 
       ! Local variables
       integer :: diag_index, idx
-      real(kind_phys), dimension(size(fsw%fluxes%bnd_flux_dn,1), &
-                                 size(fsw%fluxes%bnd_flux_dn,2), &
-                                 size(fsw%fluxes%bnd_flux_dn,3)) :: flux_dn_diffuse
+      integer :: i, k, ib
+      real(kind_phys) :: s, s2   ! band sums (direct, diffuse)
 
       errmsg = ''
       errflg = 0
@@ -69,22 +68,40 @@ CONTAINS
       end if
 
       ! Initialize to provide 0.0 values for night columns.
-      fns = 0.0_kind_phys
-      fcns = 0.0_kind_phys
-      fsns = 0.0_kind_phys
-      fsnt = 0.0_kind_phys
-      soll = 0.0_kind_phys
-      sols = 0.0_kind_phys
-      solld = 0.0_kind_phys
-      solsd = 0.0_kind_phys
-
-      do idx = 1, nday
-         fns(idxday(idx), ktopcam:) = fsw%fluxes%flux_net(idx, ktoprad:)
-         fcns(idxday(idx), ktopcam:) = fswc%fluxes%flux_net(idx, ktoprad:)
+      !$acc data copyin(idxday, fsw%fluxes, fsw%fluxes%flux_net, fsw%fluxes%bnd_flux_dn, &
+      !$acc             fsw%fluxes%bnd_flux_dn_dir, fswc%fluxes, fswc%fluxes%flux_net) &
+      !$acc      copy(fns, fcns, fsns, fsnt, soll, sols, solld, solsd)
+      !$acc parallel loop collapse(2)
+      do k = 1, size(fns, 2)
+         do i = 1, size(fns, 1)
+            fns(i, k) = 0.0_kind_phys
+            fcns(i, k) = 0.0_kind_phys
+         end do
+      end do
+      !$acc parallel loop
+      do i = 1, size(fsns)
+         fsns(i) = 0.0_kind_phys
+         fsnt(i) = 0.0_kind_phys
+         soll(i) = 0.0_kind_phys
+         sols(i) = 0.0_kind_phys
+         solld(i) = 0.0_kind_phys
+         solsd(i) = 0.0_kind_phys
       end do
 
-      fsns(:) = fns(:, pverp)
-      fsnt(:) = fns(:, ktopcam)
+      ! Daytime columns: RRTMGP levels -> host model levels
+      !$acc parallel loop collapse(2)
+      do k = ktopcam, size(fns, 2)
+         do idx = 1, nday
+            fns(idxday(idx), k) = fsw%fluxes%flux_net(idx, k - ktopcam + ktoprad)
+            fcns(idxday(idx), k) = fswc%fluxes%flux_net(idx, k - ktopcam + ktoprad)
+         end do
+      end do
+
+      !$acc parallel loop
+      do i = 1, size(fsns)
+         fsns(i) = fns(i, pverp)
+         fsnt(i) = fns(i, ktopcam)
+      end do
 
       ! Export surface fluxes
       ! sols(pcols)      Direct solar rad on surface (< 0.7)
@@ -93,24 +110,37 @@ CONTAINS
       ! Put half of band 10 in each of the UV/visible and near-IR values,
       ! since this band straddles 0.7 microns:
       ! UV/visible bands 10-13, 16000-50000 cm-1, 0.200-0.625 micron
-      ! Calculate diffuse flux from total and direct
-      flux_dn_diffuse = fsw%fluxes%bnd_flux_dn - fsw%fluxes%bnd_flux_dn_dir
+      ! The diffuse flux is the total minus the direct (bnd_flux_dn - bnd_flux_dn_dir).
+      ! The band sums add left to right from zero, as SUM does on the host
+      ! (loop seq: not vectorized into a reduction of another order).
 
       ! The following calculations are hard-coded and will need to be modified
       ! if the RRTMGP flux bands type/array ever changes
+      !$acc parallel loop private(s, s2)
       do idx = 1, nday
-         soll(idxday(idx)) = sum(fsw%fluxes%bnd_flux_dn_dir(idx,nlay+1,1:9)) &
-                             + 0.5_kind_phys * fsw%fluxes%bnd_flux_dn_dir(idx,nlay+1,10)
+         s = 0.0_kind_phys
+         s2 = 0.0_kind_phys
+         !$acc loop seq
+         do ib = 1, 9
+            s = s + fsw%fluxes%bnd_flux_dn_dir(idx, nlay+1, ib)
+            s2 = s2 + (fsw%fluxes%bnd_flux_dn(idx, nlay+1, ib) - fsw%fluxes%bnd_flux_dn_dir(idx, nlay+1, ib))
+         end do
+         soll(idxday(idx)) = s + 0.5_kind_phys * fsw%fluxes%bnd_flux_dn_dir(idx, nlay+1, 10)
+         solld(idxday(idx)) = s2 + 0.5_kind_phys * &
+            (fsw%fluxes%bnd_flux_dn(idx, nlay+1, 10) - fsw%fluxes%bnd_flux_dn_dir(idx, nlay+1, 10))
 
-         sols(idxday(idx)) = 0.5_kind_phys * fsw%fluxes%bnd_flux_dn_dir(idx,nlay+1,10)   &
-                             + sum(fsw%fluxes%bnd_flux_dn_dir(idx,nlay+1,11:14))
-
-         solld(idxday(idx)) = sum(flux_dn_diffuse(idx,nlay+1,1:9))         &
-                              + 0.5_kind_phys * flux_dn_diffuse(idx,nlay+1,10)
-
-         solsd(idxday(idx)) = 0.5_kind_phys * flux_dn_diffuse(idx, nlay+1, 10)    &
-                              + sum(flux_dn_diffuse(idx,nlay+1,11:14))
+         s = 0.0_kind_phys
+         s2 = 0.0_kind_phys
+         !$acc loop seq
+         do ib = 11, 14
+            s = s + fsw%fluxes%bnd_flux_dn_dir(idx, nlay+1, ib)
+            s2 = s2 + (fsw%fluxes%bnd_flux_dn(idx, nlay+1, ib) - fsw%fluxes%bnd_flux_dn_dir(idx, nlay+1, ib))
+         end do
+         sols(idxday(idx)) = 0.5_kind_phys * fsw%fluxes%bnd_flux_dn_dir(idx, nlay+1, 10) + s
+         solsd(idxday(idx)) = 0.5_kind_phys * &
+            (fsw%fluxes%bnd_flux_dn(idx, nlay+1, 10) - fsw%fluxes%bnd_flux_dn_dir(idx, nlay+1, 10)) + s2
       end do
+      !$acc end data
 
    end subroutine rrtmgp_sw_calculate_fluxes_run
 

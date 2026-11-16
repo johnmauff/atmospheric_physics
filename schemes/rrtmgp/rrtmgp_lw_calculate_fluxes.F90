@@ -44,6 +44,7 @@ CONTAINS
 
       ! Local variables
       integer :: diag_index, idx
+      integer :: i, k
 
       errmsg = ''
       errflg = 0
@@ -60,16 +61,33 @@ CONTAINS
          return
       end if
 
-      fnl = 0.0_kind_phys
-      fcnl = 0.0_kind_phys
+      !$acc data copyin(flw%fluxes, flw%fluxes%flux_net, flw%fluxes%flux_dn, &
+      !$acc             flwc%fluxes, flwc%fluxes%flux_net) &
+      !$acc      copy(fnl, fcnl, flns, flnt, flwds)
+      !$acc parallel loop collapse(2)
+      do k = 1, size(fnl, 2)
+         do i = 1, size(fnl, 1)
+            fnl(i, k) = 0.0_kind_phys
+            fcnl(i, k) = 0.0_kind_phys
+         end do
+      end do
 
       ! RTE-RRTMGP convention for net is (down - up) **CAM assumes (up - down) !!
-      fnl( :,ktopcam:) = -1._kind_phys * flw%fluxes%flux_net(    :, ktoprad:)
-      fcnl(:,ktopcam:) = -1._kind_phys * flwc%fluxes%flux_net(   :, ktoprad:)
+      !$acc parallel loop collapse(2)
+      do k = ktopcam, size(fnl, 2)
+         do i = 1, size(fnl, 1)
+            fnl(i, k) = -1._kind_phys * flw%fluxes%flux_net(i, k - ktopcam + ktoprad)
+            fcnl(i, k) = -1._kind_phys * flwc%fluxes%flux_net(i, k - ktopcam + ktoprad)
+         end do
+      end do
 
-      flns(:ncol) = fnl(:ncol, pverp)
-      flnt(:ncol) = fnl(:ncol, ktopcam)
-      flwds(:ncol) = flw%fluxes%flux_dn(:, nlay+1)
+      !$acc parallel loop
+      do i = 1, ncol
+         flns(i) = fnl(i, pverp)
+         flnt(i) = fnl(i, ktopcam)
+         flwds(i) = flw%fluxes%flux_dn(i, nlay+1)
+      end do
+      !$acc end data
 
    end subroutine rrtmgp_lw_calculate_fluxes_run
 

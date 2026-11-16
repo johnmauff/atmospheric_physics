@@ -34,18 +34,38 @@ contains
     character(len=*), intent(out) :: errmsg                       !< CCPP error message
     integer,          intent(out) :: errflg                       !< CCPP error flag
 
+    integer :: i, k, ib
+
     ! Initialize CCPP error handling variables
     errmsg = ''
     errflg = 0
 
     if (.not. dolwrad) return
 
+    ! The object is only copied in (copying it back could overwrite scalars
+    ! set on the host); its tau array is written out.
+    !$acc data copyin(aer_lw_abs, aer_lw%optical_props) copyout(aer_lw%optical_props%tau)
     ! Initialize to zero (provides zero optical depth in any extra layer)
-    aer_lw%optical_props%tau = 0.0_kind_phys
+    !$acc parallel loop collapse(3)
+    do ib = 1, size(aer_lw%optical_props%tau, 3)
+      do k = 1, size(aer_lw%optical_props%tau, 2)
+        do i = 1, size(aer_lw%optical_props%tau, 1)
+          aer_lw%optical_props%tau(i, k, ib) = 0.0_kind_phys
+        end do
+      end do
+    end do
 
     ! Map CAM vertical levels to RRTMGP vertical levels
     ! No band reorder needed for LW
-    aer_lw%optical_props%tau(:ncol, ktoprad:, :) = aer_lw_abs(:ncol, ktopcam:, :)
+    !$acc parallel loop collapse(3)
+    do ib = 1, size(aer_lw_abs, 3)
+      do k = ktoprad, size(aer_lw%optical_props%tau, 2)
+        do i = 1, ncol
+          aer_lw%optical_props%tau(i, k, ib) = aer_lw_abs(i, k - ktoprad + ktopcam, ib)
+        end do
+      end do
+    end do
+    !$acc end data
 
   end subroutine rrtmgp_lw_aerosols_run
 end module rrtmgp_lw_aerosols

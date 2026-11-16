@@ -50,10 +50,9 @@ contains
     integer,          intent(out) :: errflg                       !< CCPP error flag
 
     ! Local variables
-    integer :: i
-    real(kind_phys) :: tau_reordered(ncol, pver, nswbands)
-    real(kind_phys) :: tau_w_reordered(ncol, pver, nswbands)
-    real(kind_phys) :: tau_w_g_reordered(ncol, pver, nswbands)
+    integer :: i, k, ib, ic, kc, bc
+    integer :: band_map(size(rrtmg_to_rrtmgp_swbands))
+    real(kind_phys) :: t, tw
 
     ! Initialize CCPP error handling variables
     errmsg = ''
@@ -61,44 +60,69 @@ contains
 
     if (.not. doswrad .or. nday == 0) return
 
-    ! Reorder from RRTMG band order to RRTMGP band order
-    tau_reordered(:ncol, :, :)     = aer_tau(:ncol, :, rrtmg_to_rrtmgp_swbands)
-    tau_w_reordered(:ncol, :, :)   = aer_tau_w(:ncol, :, rrtmg_to_rrtmgp_swbands)
-    tau_w_g_reordered(:ncol, :, :) = aer_tau_w_g(:ncol, :, rrtmg_to_rrtmgp_swbands)
+    ! Band map (RRTMG band order -> RRTMGP), as data the kernels read
+    band_map = rrtmg_to_rrtmgp_swbands
+
+    !$acc data copyin(aer_tau, aer_tau_w, aer_tau_w_g, idxday, band_map, aer_sw%optical_props) &
+    !$acc      copyout(aer_sw%optical_props%tau, aer_sw%optical_props%ssa, aer_sw%optical_props%g)
 
     ! Initialize defaults: tau=0, ssa=1, g=0
-    aer_sw%optical_props%tau = 0.0_kind_phys
-    aer_sw%optical_props%ssa = 1.0_kind_phys
-    aer_sw%optical_props%g   = 0.0_kind_phys
+    !$acc parallel loop collapse(3)
+    do ib = 1, size(aer_sw%optical_props%tau, 3)
+      do k = 1, size(aer_sw%optical_props%tau, 2)
+        do i = 1, size(aer_sw%optical_props%tau, 1)
+          aer_sw%optical_props%tau(i, k, ib) = 0.0_kind_phys
+          aer_sw%optical_props%ssa(i, k, ib) = 1.0_kind_phys
+          aer_sw%optical_props%g(i, k, ib)   = 0.0_kind_phys
+        end do
+      end do
+    end do
 
-    ! Subset to daytime columns and map CAM vertical to RRTMGP vertical
-    do i = 1, nday
-      ! Set aerosol optical depth, clip to zero
-      aer_sw%optical_props%tau(i, ktoprad:, :) = &
-        max(tau_reordered(idxday(i), ktopcam:, :), 0._kind_phys)
+    ! Subset to daytime columns, reorder from RRTMG band order to RRTMGP band
+    ! order and map CAM vertical to RRTMGP vertical
+    !$acc parallel loop collapse(3) private(ic, kc, bc, t, tw)
+    do ib = 1, nswbands
+      do k = ktoprad, size(aer_sw%optical_props%tau, 2)
+        do i = 1, nday
+          ic = idxday(i)
+          kc = k - ktoprad + ktopcam
+          bc = band_map(ib)
+          t  = aer_tau(ic, kc, bc)
+          tw = aer_tau_w(ic, kc, bc)
 
-      ! Set single scattering albedo: ssa = tau_w / tau
-      where (tau_reordered(idxday(i), ktopcam:, :) > 0._kind_phys)
-        aer_sw%optical_props%ssa(i, ktoprad:, :) = &
-          tau_w_reordered(idxday(i), ktopcam:, :) &
-          / tau_reordered(idxday(i), ktopcam:, :)
-      elsewhere
-        aer_sw%optical_props%ssa(i, ktoprad:, :) = 1._kind_phys
-      end where
+          ! Set aerosol optical depth, clip to zero
+          aer_sw%optical_props%tau(i, k, ib) = max(t, 0._kind_phys)
 
-      ! Set asymmetry parameter: g = tau_w_g / tau_w
-      where (tau_w_reordered(idxday(i), ktopcam:, :) > tiny)
-        aer_sw%optical_props%g(i, ktoprad:, :) = &
-          tau_w_g_reordered(idxday(i), ktopcam:, :) &
-          / tau_w_reordered(idxday(i), ktopcam:, :)
-      elsewhere
-        aer_sw%optical_props%g(i, ktoprad:, :) = 0._kind_phys
-      end where
+          ! Set single scattering albedo: ssa = tau_w / tau
+          if (t > 0._kind_phys) then
+            aer_sw%optical_props%ssa(i, k, ib) = tw / t
+          else
+            aer_sw%optical_props%ssa(i, k, ib) = 1._kind_phys
+          end if
+
+          ! Set asymmetry parameter: g = tau_w_g / tau_w
+          if (tw > tiny) then
+            aer_sw%optical_props%g(i, k, ib) = aer_tau_w_g(ic, kc, bc) / tw
+          else
+            aer_sw%optical_props%g(i, k, ib) = 0._kind_phys
+          end if
+        end do
+      end do
     end do
 
     ! Impose limits on the components
-    aer_sw%optical_props%ssa = min(max(aer_sw%optical_props%ssa, 0._kind_phys), 1._kind_phys)
-    aer_sw%optical_props%g   = min(max(aer_sw%optical_props%g, -1._kind_phys), 1._kind_phys)
+    !$acc parallel loop collapse(3)
+    do ib = 1, size(aer_sw%optical_props%tau, 3)
+      do k = 1, size(aer_sw%optical_props%tau, 2)
+        do i = 1, size(aer_sw%optical_props%tau, 1)
+          aer_sw%optical_props%ssa(i, k, ib) = &
+            min(max(aer_sw%optical_props%ssa(i, k, ib), 0._kind_phys), 1._kind_phys)
+          aer_sw%optical_props%g(i, k, ib) = &
+            min(max(aer_sw%optical_props%g(i, k, ib), -1._kind_phys), 1._kind_phys)
+        end do
+      end do
+    end do
+    !$acc end data
 
   end subroutine rrtmgp_sw_aerosols_run
 end module rrtmgp_sw_aerosols

@@ -44,17 +44,31 @@ subroutine rrtmgp_post_run(nlay, dolw, qrs_prime, qrl_prime, fsns, pdel, atm_opt
    character(len=*),                 intent(out)   :: errmsg
    integer,                          intent(out)   :: errflg
 
+   integer :: i, k
+
    ! Set error varaibles
    errflg = 0
    errmsg = ''
    ! The radiative heating rates are maintained across multiple physics timesteps
    ! as Q*dp (for energy conservation).
-   qrs(:,:) = qrs_prime(:,:) * pdel(:,:)
-   qrl(:,:) = qrl_prime(:,:) * pdel(:,:)
+   !$acc data copyin(qrs_prime, qrl_prime, pdel, fsns) copyout(qrs, qrl, netsw)
+   !$acc parallel loop collapse(2)
+   do k = 1, size(qrs, 2)
+      do i = 1, size(qrs, 1)
+         qrs(i, k) = qrs_prime(i, k) * pdel(i, k)
+         qrl(i, k) = qrl_prime(i, k) * pdel(i, k)
+      end do
+   end do
 
    ! Set the netsw to be sent to the coupler
-   netsw(:) = fsns(:)
+   !$acc parallel loop
+   do i = 1, size(netsw)
+      netsw(i) = fsns(i)
+   end do
+   !$acc end data
 
+   ! On the host, with the RTE objects this scheme frees below: their device
+   ! copies are a later step (rrtmgp-rte-object-residency).
    if (dolw) then
       flwds(:) = flw%fluxes%flux_dn(:, nlay+1)
    end if

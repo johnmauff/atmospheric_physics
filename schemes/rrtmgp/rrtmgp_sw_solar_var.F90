@@ -41,10 +41,10 @@ contains
      integer,            intent(out)   :: errflg
 
      ! Local variables 
-     integer :: i, j, gpt_start, gpt_end, ncols
-     real(kind_phys), allocatable :: scale(:)
-     character(len=256)          :: alloc_errmsg
-     character(len=*), parameter :: sub = 'rrtmgp_sw_solar_var_run'
+     integer :: i, j, ib
+     real(kind_phys) :: s                                  ! g-point sum of toa_flux
+     real(kind_phys) :: band_irrad(nswbands)               ! irrad, as data the kernel reads
+     integer         :: band_gpts(2, nswbands)             ! band2gpt_sw, likewise
 
      ! Initialize error variables
      errflg = 0
@@ -54,33 +54,49 @@ contains
         return
      end if
 
-     if (do_spectral_scaling) then 
-
-        ! Determine target irradiance for each band
+     if (do_spectral_scaling) then
+        ! Determine target irradiance for each band (on the host)
         call integrate_spectrum(nbins, nswbands, wave_end, radbinmin, radbinmax, sol_irrad, irrad)
-
-        ncols = size(toa_flux, 1)
-        allocate(scale(ncols), stat=errflg, errmsg=alloc_errmsg)
-        if (errflg /= 0) then
-           write(errmsg,*) sub, ': Error allocating "scale", message - ', alloc_errmsg
-           errflg = 1
-           return
-        end if
-
-        do i = 1, nswbands 
-           gpt_start = band2gpt_sw(1,i) 
-           gpt_end   = band2gpt_sw(2,i) 
-           scale = spread(irrad(i), 1, ncols) / sum(toa_flux(:, gpt_start:gpt_end), dim=2)
-           do j = gpt_start, gpt_end
-              sfac(:,j) = scale
-           end do
-        end do
-
-     else 
-        sfac(:,:) = sol_tsi / spread(sum(toa_flux, 2), 2, size(toa_flux, 2))
+        band_irrad(:) = irrad(:nswbands)
+     else
+        band_irrad(:) = 0.0_kind_phys
      end if
+     band_gpts(:, :) = band2gpt_sw(:, :nswbands)
 
-     toa_flux = toa_flux * sfac * eccf
+     ! One column per thread; the g-point sums add left to right from zero,
+     ! as SUM does on the host: the inner loops are sequential (loop seq), or
+     ! the compiler may vectorize them into reductions of another order.
+     !$acc parallel loop private(s) copyin(band_irrad, band_gpts) copy(toa_flux) copyout(sfac)
+     do i = 1, size(toa_flux, 1)
+        if (do_spectral_scaling) then
+           !$acc loop seq
+           do ib = 1, nswbands
+              s = 0.0_kind_phys
+              !$acc loop seq
+              do j = band_gpts(1, ib), band_gpts(2, ib)
+                 s = s + toa_flux(i, j)
+              end do
+              !$acc loop seq
+              do j = band_gpts(1, ib), band_gpts(2, ib)
+                 sfac(i, j) = band_irrad(ib) / s
+              end do
+           end do
+        else
+           s = 0.0_kind_phys
+           !$acc loop seq
+           do j = 1, size(toa_flux, 2)
+              s = s + toa_flux(i, j)
+           end do
+           !$acc loop seq
+           do j = 1, size(toa_flux, 2)
+              sfac(i, j) = sol_tsi / s
+           end do
+        end if
+        !$acc loop seq
+        do j = 1, size(toa_flux, 2)
+           toa_flux(i, j) = toa_flux(i, j) * sfac(i, j) * eccf
+        end do
+     end do
 
   end subroutine rrtmgp_sw_solar_var_run
 
