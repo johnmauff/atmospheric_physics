@@ -35,9 +35,9 @@ contains
     integer,                     intent(out)   :: errflg
 
     ! Local variables
-    integer :: i, gas_idx, idx(ncol)
+    integer :: i, k, gas_idx
     integer :: istat
-    real(kind_phys)              :: gas_mmr(ncol, pverp-1)
+    logical :: is_h2o
     real(kind_phys)              :: gas_vmr(ncol, nlay)
     real(kind_phys)              :: mmr(ncol, nlay)
     real(kind_phys) :: massratio
@@ -57,36 +57,45 @@ contains
        return
     end if
 
-    ! set the column indices; just count for longwave
-    do i = 1, ncol
-       idx(i) = i
-    end do
+    ! gas_vmr is computed on the device, where set_vmr copies it into
+    ! gas_concs (RRTMGP keeps the concentrations on the device).
+    !$acc data create(mmr, gas_vmr)
 
     do gas_idx = 1, nradgas
 
-       ! grab mass mixing ratio of gas
-       gas_mmr = rad_const_array(:,:,gas_idx)
-
-       do i = 1, ncol
-          mmr(i,ktoprad:) = gas_mmr(idx(i),ktopcam:)
+       ! grab mass mixing ratio of gas (all columns for longwave)
+       !$acc parallel loop collapse(2) default(present)
+       do k = ktoprad, nlay
+          do i = 1, ncol
+             mmr(i,k) = rad_const_array(i,k-ktoprad+ktopcam,gas_idx)
+          end do
        end do
 
        ! If an extra layer is being used, copy mmr from the top layer of CAM to the extra layer.
        if (nlay == pverp) then
-          mmr(:,1) = mmr(:,2)
+          !$acc parallel loop default(present)
+          do i = 1, ncol
+             mmr(i,1) = mmr(i,2)
+          end do
        end if
-
-       ! special case: H2O is specific humidity, not mixing ratio. Use r = q/(1-q):
-       if (gaslist(gas_idx) == 'H2O') then 
-          mmr = mmr / (1._kind_phys - mmr)
-       end if  
 
        ! convert MMR to VMR, multipy by ratio of dry air molar mas to gas molar mass.
        call get_molar_mass_ratio(gaslist(gas_idx), massratio, errmsg, errflg)
        if (errflg /= 0) then
-          return
+          exit
        end if
-       gas_vmr = mmr * massratio
+
+       ! special case: H2O is specific humidity, not mixing ratio. Use r = q/(1-q):
+       is_h2o = gaslist(gas_idx) == 'H2O'
+       !$acc parallel loop collapse(2) default(present)
+       do k = 1, nlay
+          do i = 1, ncol
+             if (is_h2o) then
+                mmr(i,k) = mmr(i,k) / (1._kind_phys - mmr(i,k))
+             end if
+             gas_vmr(i,k) = mmr(i,k) * massratio
+          end do
+       end do
 
        ! special case: Setting O3 in the extra layer:
        ! 
@@ -97,9 +106,11 @@ contains
 
        if ((gaslist(gas_idx) == 'O3') .and. (nlay == pverp)) then
           P_top = 50.0_kind_phys
+          !$acc parallel loop default(present) &
+          !$acc private(P_int, P_mid, alpha, beta, a, b, chi_mid, chi_0, chi_eff)
           do i = 1, ncol
-             P_int = pint(idx(i),1) ! pressure (Pa) at upper interface of CAM
-             P_mid = pmid(idx(i),1) ! pressure (Pa) at midpoint of top layer of CAM
+             P_int = pint(i,1) ! pressure (Pa) at upper interface of CAM
+             P_mid = pmid(i,1) ! pressure (Pa) at midpoint of top layer of CAM
              alpha = log(P_int/P_top)
              beta =  log(P_mid/P_int)/log(P_mid/P_top)
 
@@ -118,10 +129,12 @@ contains
        errmsg = gas_concs%set_vmr(gaslist(gas_idx), gas_vmr)
        if (len_trim(errmsg) > 0) then
           errflg = 1
-          return
+          exit
        end if
 
     end do
+
+    !$acc end data
 
   end subroutine rrtmgp_lw_gas_optics_pre_run
 

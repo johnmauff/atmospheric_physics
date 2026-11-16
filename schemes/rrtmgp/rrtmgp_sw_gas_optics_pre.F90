@@ -36,8 +36,9 @@ contains
     integer,                     intent(out)   :: errflg
 
     ! Local variables
-    integer :: i, gas_idx
+    integer :: i, k, gas_idx
     integer :: istat
+    logical :: is_h2o
     real(kind_phys), allocatable :: gas_vmr(:,:)
     real(kind_phys)              :: mmr(nday, nlay)
     real(kind_phys) :: massratio
@@ -64,28 +65,44 @@ contains
     end if
     ! Check allocate
 
+    ! gas_vmr is computed on the device, where set_vmr copies it into
+    ! gas_concs (RRTMGP keeps the concentrations on the device).
+    !$acc data create(mmr, gas_vmr)
+
     do gas_idx = 1, nradgas
 
-       do i = 1, nday
-          mmr(i,ktoprad:) = rad_const_array(idxday(i),ktopcam:,gas_idx)
+       !$acc parallel loop collapse(2) default(present)
+       do k = ktoprad, nlay
+          do i = 1, nday
+             mmr(i,k) = rad_const_array(idxday(i),k-ktoprad+ktopcam,gas_idx)
+          end do
        end do
 
        ! If an extra layer is being used, copy mmr from the top layer of CAM to the extra layer.
        if (nlay == pverp) then
-          mmr(:,1) = mmr(:,2)
+          !$acc parallel loop default(present)
+          do i = 1, nday
+             mmr(i,1) = mmr(i,2)
+          end do
        end if
-
-       ! special case: H2O is specific humidity, not mixing ratio. Use r = q/(1-q):
-       if (gaslist(gas_idx) == 'H2O') then 
-          mmr = mmr / (1._kind_phys - mmr)
-       end if  
 
        ! convert MMR to VMR, multipy by ratio of dry air molar mas to gas molar mass.
        call get_molar_mass_ratio(gaslist(gas_idx), massratio, errmsg, errflg)
        if (errflg /= 0) then
-          return
+          exit
        end if
-       gas_vmr = mmr * massratio
+
+       ! special case: H2O is specific humidity, not mixing ratio. Use r = q/(1-q):
+       is_h2o = gaslist(gas_idx) == 'H2O'
+       !$acc parallel loop collapse(2) default(present)
+       do k = 1, nlay
+          do i = 1, nday
+             if (is_h2o) then
+                mmr(i,k) = mmr(i,k) / (1._kind_phys - mmr(i,k))
+             end if
+             gas_vmr(i,k) = mmr(i,k) * massratio
+          end do
+       end do
 
        ! special case: Setting O3 in the extra layer:
        ! 
@@ -96,6 +113,8 @@ contains
 
        if ((gaslist(gas_idx) == 'O3') .and. (nlay == pverp)) then
           P_top = 50.0_kind_phys
+          !$acc parallel loop default(present) &
+          !$acc private(P_int, P_mid, alpha, beta, a, b, chi_mid, chi_0, chi_eff)
           do i = 1, nday
              P_int = pint(idxday(i),1) ! pressure (Pa) at upper interface of CAM
              P_mid = pmid(idxday(i),1) ! pressure (Pa) at midpoint of top layer of CAM
@@ -117,10 +136,12 @@ contains
        errmsg = gas_concs%set_vmr(gaslist(gas_idx), gas_vmr)
        if (len_trim(errmsg) > 0) then
           errflg = 1
-          return
+          exit
        end if
 
     end do
+
+    !$acc end data
 
   end subroutine rrtmgp_sw_gas_optics_pre_run
 
