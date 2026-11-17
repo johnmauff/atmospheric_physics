@@ -105,15 +105,23 @@ subroutine rrtmgp_lw_mcica_subcol_gen_run( &
    ! Band of each g-point (the gas optics' convert_gpt2band)
    gpt2band(:) = kdist%gas_props%get_gpoint_bands()
 
+   ! The object is only copied in (copying it back could overwrite scalars
+   ! set on the host); its tau array is written out.
+   !$acc data copyin(pmid, cldfprime, c_cld_lw_abs, gpt2band, cloud_lw%optical_props) &
+   !$acc      copyout(cloud_lw%optical_props%tau)                                     &
+   !$acc      create(cldf, cdf, tauc)
+
    ! Subset "chunk" data so just the number of CAM layers in the
    ! radiation calculation are used by MCICA to produce subcolumns;
    ! clip cloud fraction and enforce tauc >= 0.
+   !$acc parallel loop gang vector collapse(2) default(present) private(tau_k)
    do kdx = 1, nlay
       do idx = 1, ncol
          cldf(idx,kdx) = cldfprime(idx,ktopcam+kdx-1)
          if (cldf(idx,kdx) < cldmin) then
             cldf(idx,kdx) = 0._kind_phys
          end if
+         !$acc loop seq
          do bnd = 1, nbnd
             tau_k = c_cld_lw_abs(bnd,idx,ktopcam+kdx-1)
             if (tau_k > 0.0_kind_phys) then
@@ -128,6 +136,8 @@ subroutine rrtmgp_lw_mcica_subcol_gen_run( &
    ! Random numbers: one KISS stream per column, seeded from the state of
    ! the column (pmid of the bottom four layers), advanced by changeseed
    ! values, then one number per subcolumn and level (level fastest).
+   !$acc parallel loop gang vector default(present) &
+   !$acc   private(kiss_seed1, kiss_seed2, kiss_seed3, kiss_seed4, s1, s2, s3, s4, rand_num)
    do idx = 1, ncol
       kiss_seed1 = (pmid(idx,pver)   - int(pmid(idx,pver)))    * 1000000000
       kiss_seed2 = (pmid(idx,pver-1) - int(pmid(idx,pver-1)))  * 1000000000
@@ -137,10 +147,13 @@ subroutine rrtmgp_lw_mcica_subcol_gen_run( &
       s2 = kiss_rng_seed(kiss_seed2)
       s3 = kiss_rng_seed(kiss_seed3)
       s4 = kiss_rng_seed(kiss_seed4)
+      !$acc loop seq
       do ndx = 1, changeseed
          rand_num = kiss_rng_next(s1, s2, s3, s4)
       end do
+      !$acc loop seq
       do isubcol = 1, ngpt
+         !$acc loop seq
          do kdx = 1, nlay
             cdf(isubcol,idx,kdx) = kiss_rng_next(s1, s2, s3, s4)
          end do
@@ -153,9 +166,12 @@ subroutine rrtmgp_lw_mcica_subcol_gen_run( &
    !    - if the layer above is cloudy, use the same random number as in the layer above
    !    - if the layer above is clear, use a new random number
 
-   do kdx = 2, nlay
-      do idx = 1, ncol
-         do isubcol = 1, ngpt
+   ! (each subcolumn of each column is independent; the levels are sequential)
+   !$acc parallel loop gang vector collapse(2) default(present)
+   do idx = 1, ncol
+      do isubcol = 1, ngpt
+         !$acc loop seq
+         do kdx = 2, nlay
             if (cdf(isubcol,idx,kdx-1) > 1._kind_phys - cldf(idx,kdx-1) ) then
                cdf(isubcol,idx,kdx) = cdf(isubcol,idx,kdx-1)
             else
@@ -167,12 +183,20 @@ subroutine rrtmgp_lw_mcica_subcol_gen_run( &
 
    ! If there is an extra layer in the radiation then this initialization
    ! will provide zero optical depths there
-   cloud_lw%optical_props%tau = 0.0_kind_phys
+   !$acc parallel loop gang vector collapse(3) default(present)
+   do isubcol = 1, size(cloud_lw%optical_props%tau, 3)
+      do kdx = 1, size(cloud_lw%optical_props%tau, 2)
+         do idx = 1, size(cloud_lw%optical_props%tau, 1)
+            cloud_lw%optical_props%tau(idx,kdx,isubcol) = 0.0_kind_phys
+         end do
+      end do
+   end do
 
    ! -- generate subcolumns for homogeneous clouds -----
    ! where there is a cloud (the subcolumn is cloudy), set the subcolumn
    ! cloud properties on the g-points; incoming tauc should be in-cloud
    ! quantites and not grid-averaged quantities
+   !$acc parallel loop gang vector collapse(3) default(present)
    do isubcol = 1, ngpt
       do kdx = 1, nlay
          do idx = 1, ncol
@@ -187,12 +211,15 @@ subroutine rrtmgp_lw_mcica_subcol_gen_run( &
       end do
    end do
 
-   ! validate checks that: tau > 0
+   ! validate checks that: tau > 0 (on the device data)
    errmsg = cloud_lw%optical_props%validate()
+
+   !$acc end data
+
    if (len_trim(errmsg) > 0) then
        errflg = 1
        return
-   end if 
+   end if
 
 end subroutine rrtmgp_lw_mcica_subcol_gen_run
 

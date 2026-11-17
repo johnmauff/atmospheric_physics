@@ -91,10 +91,20 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
       ! Band of each g-point (the gas optics' convert_gpt2band)
       gpt2band(:) = kdist_sw%gas_props%get_gpoint_bands()
 
+      ! The object is only copied in (copying it back could overwrite scalars
+      ! set on the host); its tau, ssa and g arrays are written out.
+      !$acc data copyin(idxday, cldfprime, c_cld_tau, c_cld_tau_w, c_cld_tau_w_g, pmid_day,   &
+      !$acc             gpt2band, cloud_sw%optical_props)                                   &
+      !$acc      copyout(cloud_sw%optical_props%tau, cloud_sw%optical_props%ssa,            &
+      !$acc              cloud_sw%optical_props%g)                                          &
+      !$acc      create(cdf, cldfrac, tauc, ssac, asmc)
+
       ! Subset data so just the daylight columns, and the number of CAM layers in the
       ! radiation calculation are used by MCICA to produce subcolumns, and compute
       ! the optical properties needed for the 2-stream calculations.  These
       ! calculations are the same as the RRTMG version.
+      !$acc parallel loop gang vector collapse(2) default(present) &
+      !$acc   private(icol, tau_k, tau_w_k, tau_w_g_k, tauc_k, asmc_k)
       do k = 1, nver
          do i = 1, nday
             icol = idxday(i)
@@ -103,6 +113,7 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
             if (cldfrac(i,k) < cldmin) then
                cldfrac(i,k) = 0._kind_phys
             end if
+            !$acc loop seq
             do n = 1, nswbands
                tau_k     = c_cld_tau    (n,icol,ktopcam+k-1)
                tau_w_k   = c_cld_tau_w  (n,icol,ktopcam+k-1)
@@ -135,6 +146,8 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
       ! Random numbers: one KISS stream per daylight column, seeded from the
       ! state of the column (pmid_day of the bottom four layers), advanced by
       ! changeseed values, then one number per subcolumn and level (level fastest).
+      !$acc parallel loop gang vector default(present) &
+      !$acc   private(kiss_seed1, kiss_seed2, kiss_seed3, kiss_seed4, s1, s2, s3, s4, rand_num)
       do i = 1, nday
          kiss_seed1 = (pmid_day(i,nlay)   - int(pmid_day(i,nlay)))    * 1000000000
          kiss_seed2 = (pmid_day(i,nlay-1) - int(pmid_day(i,nlay-1)))  * 1000000000
@@ -144,10 +157,13 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
          s2 = kiss_rng_seed(kiss_seed2)
          s3 = kiss_rng_seed(kiss_seed3)
          s4 = kiss_rng_seed(kiss_seed4)
+         !$acc loop seq
          do n = 1, changeseed
             rand_num = kiss_rng_next(s1, s2, s3, s4)
          end do
+         !$acc loop seq
          do isubcol = 1, nswgpts
+            !$acc loop seq
             do k = 1, nver
                cdf(isubcol,i,k) = kiss_rng_next(s1, s2, s3, s4)
             end do
@@ -159,9 +175,12 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
       ! ii) walk down the column:
       !    - if the layer above is cloudy, use the same random number as in the layer above
       !    - if the layer above is clear, use a new random number
-      do k = 2, nver
-         do i = 1, nday
-            do isubcol = 1, nswgpts
+      ! (each subcolumn of each column is independent; the levels are sequential)
+      !$acc parallel loop gang vector collapse(2) default(present)
+      do i = 1, nday
+         do isubcol = 1, nswgpts
+            !$acc loop seq
+            do k = 2, nver
                if (cdf(isubcol,i,k-1) > 1._kind_phys - cldfrac(i,k-1) ) then
                   cdf(isubcol,i,k) = cdf(isubcol,i,k-1)
                else
@@ -173,14 +192,22 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
 
       ! If there is an extra layer in the radiation then this initialization
       ! will provide the optical properties there.
-      cloud_sw%optical_props%tau = 0.0_kind_phys
-      cloud_sw%optical_props%ssa = 1.0_kind_phys
-      cloud_sw%optical_props%g   = 0.0_kind_phys
+      !$acc parallel loop gang vector collapse(3) default(present)
+      do igpt = 1, size(cloud_sw%optical_props%tau, 3)
+         do k = 1, size(cloud_sw%optical_props%tau, 2)
+            do i = 1, size(cloud_sw%optical_props%tau, 1)
+               cloud_sw%optical_props%tau(i,k,igpt) = 0.0_kind_phys
+               cloud_sw%optical_props%ssa(i,k,igpt) = 1.0_kind_phys
+               cloud_sw%optical_props%g  (i,k,igpt) = 0.0_kind_phys
+            end do
+         end do
+      end do
 
       ! -- generate subcolumns for homogeneous clouds -----
       ! where there is a cloud (the subcolumn is cloudy), set the subcolumn
       ! cloud properties on the g-points; incoming tauc should be in-cloud
       ! quantites and not grid-averaged quantities
+      !$acc parallel loop gang vector collapse(3) default(present) private(n)
       do igpt = 1, nswgpts
          do k = 1, nver
             do i = 1, nday
@@ -199,15 +226,15 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
          end do
       end do
 
-      ! validate checks that: tau > 0, ssa is in range [0,1], and g is in range [-1,1]
+      ! validate checks that: tau > 0, ssa is in range [0,1], and g is in range [-1,1];
+      ! delta scaling adjusts for forward scattering (both on the device data)
       errmsg = cloud_sw%optical_props%validate()
-      if (len_trim(errmsg) > 0) then
-         errflg = 1
-         return
+      if (len_trim(errmsg) == 0) then
+         errmsg = cloud_sw%optical_props%delta_scale()
       end if
 
-      ! delta scaling adjusts for forward scattering
-      errmsg = cloud_sw%optical_props%delta_scale()
+      !$acc end data
+
       if (len_trim(errmsg) > 0) then
          errflg = 1
          return
