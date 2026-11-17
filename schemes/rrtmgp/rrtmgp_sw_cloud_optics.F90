@@ -107,6 +107,7 @@ subroutine rrtmgp_sw_cloud_optics_run(dosw, ncol, pver, ktopcam, ktoprad,  nswgp
    integer :: i, k, ns, pb
    integer :: ngrau_warn
    real(kind_phys) :: ctau, ctau_w, ctau_w_g
+   integer :: bandmap(nswbands)      ! rrtmg_to_rrtmgp_swbands
 
    ! cloud radiative parameters are "in cloud" not "in cell"
    ! All of these are in RRTMG band order (that of the optics datasets); the
@@ -137,144 +138,159 @@ subroutine rrtmgp_sw_cloud_optics_run(dosw, ncol, pver, ktopcam, ktoprad,  nswgp
       return
    end if
 
-   ! Combine the cloud optical properties.
-
-   select case (trim(liq_cld_optics))
-   case ('slingo')
-      ! Slingo (1989) liquid optics
-      call slingo_liq_optics_sw(ncol, pver, nswbands, cld, rel, iclwpth, liq_tau, liq_tau_w, liq_tau_w_g, sw_tau_w_f, errmsg, errflg)
-   case ('gammadist')
-      ! gammadist liquid optics
-      call get_liquid_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_liq, asm_sw_liq, ssa_sw_liq, lamc, pgam, g_lambda, g_mu, iclwpth, liq_tau, liq_tau_w, liq_tau_w_g, sw_tau_w_f, errmsg, errflg)
-   case default
+   ! Check the parameterization selectors on the host, before the data region
+   if (trim(liq_cld_optics) /= 'slingo' .and. trim(liq_cld_optics) /= 'gammadist') then
       write(errmsg,'(a,a)') sub, ': liq_cld_optics must be either slingo or gammadist'
       errflg = 1
-   end select
-   if (errflg /= 0) then
       return
    end if
-
-   select case (trim(ice_cld_optics))
-   case ('ebertcurry')
-      ! Ebert and Curry (1992) ice optics
-      call ec_ice_optics_sw(ncol, pver, nswbands, cld, rei, iciwpth, ice_tau, ice_tau_w, ice_tau_w_g, sw_tau_w_f, errmsg, errflg)
-   case ('mitchell')
-      ! Mitchell ice optics
-      call interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, asm_sw_ice, ssa_sw_ice, iciwpth, dei, g_d_eff, &
-           ice_tau, ice_tau_w, ice_tau_w_g, sw_tau_w_f, errmsg, errflg)
-   case default
+   if (trim(ice_cld_optics) /= 'ebertcurry' .and. trim(ice_cld_optics) /= 'mitchell') then
       write(errmsg,'(a,a)') sub, ': ice_cld_optics must be either ebertcurry or mitchell'
       errflg = 1
-   end select
-   if (errflg /= 0) then
       return
    end if
 
-   do k = 1, pver
-      do i = 1, ncol
-         do ns = 1, nswbands
-            cld_tau(ns,i,k)     =  liq_tau(ns,i,k)     + ice_tau(ns,i,k)
-            cld_tau_w(ns,i,k)   =  liq_tau_w(ns,i,k)   + ice_tau_w(ns,i,k)
-            cld_tau_w_g(ns,i,k) =  liq_tau_w_g(ns,i,k) + ice_tau_w_g(ns,i,k)
+   ! RRTMG -> RRTMGP band map, as a variable for the device
+   bandmap(:) = rrtmg_to_rrtmgp_swbands(1:nswbands)
+
+   !$acc data copyin(lamc, pgam, rel, rei, dei, des, degrau, iclwpth, iciwpth, icswpth,      &
+   !$acc             icgrauwpth, cld, cldfsnow, cldfgrau, cldfprime, idxnite, bandmap)      &
+   !$acc      copyout(cld_tau, grau_tau, snow_tau, c_cld_tau, c_cld_tau_w, c_cld_tau_w_g,   &
+   !$acc              tot_cld_vistau, tot_icld_vistau, liq_icld_vistau, ice_icld_vistau,    &
+   !$acc              snow_icld_vistau, grau_icld_vistau)                                   &
+   !$acc      create(liq_tau, liq_tau_w, liq_tau_w_g, ice_tau, ice_tau_w, ice_tau_w_g,      &
+   !$acc             snow_tau_r, snow_tau_w, snow_tau_w_g, cld_tau_w, cld_tau_w_g,          &
+   !$acc             grau_tau_r, grau_tau_w, grau_tau_w_g, sw_tau_w_f)
+
+   ! Combine the cloud optical properties.
+   if (trim(liq_cld_optics) == 'slingo') then
+      ! Slingo (1989) liquid optics
+      call slingo_liq_optics_sw(ncol, pver, nswbands, cld, rel, iclwpth, liq_tau, liq_tau_w, liq_tau_w_g, sw_tau_w_f, errmsg, errflg)
+   else
+      ! gammadist liquid optics
+      call get_liquid_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_liq, asm_sw_liq, ssa_sw_liq, lamc, pgam, g_lambda, g_mu, iclwpth, liq_tau, liq_tau_w, liq_tau_w_g, sw_tau_w_f, errmsg, errflg)
+   end if
+
+   if (errflg == 0) then
+      if (trim(ice_cld_optics) == 'ebertcurry') then
+         ! Ebert and Curry (1992) ice optics
+         call ec_ice_optics_sw(ncol, pver, nswbands, cld, rei, iciwpth, ice_tau, ice_tau_w, ice_tau_w_g, sw_tau_w_f, errmsg, errflg)
+      else
+         ! Mitchell ice optics
+         call interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, asm_sw_ice, ssa_sw_ice, iciwpth, dei, g_d_eff, &
+              ice_tau, ice_tau_w, ice_tau_w_g, sw_tau_w_f, errmsg, errflg)
+      end if
+   end if
+
+   if (errflg == 0) then
+      !$acc parallel loop gang vector collapse(3) default(present)
+      do k = 1, pver
+         do i = 1, ncol
+            do ns = 1, nswbands
+               cld_tau(ns,i,k)     =  liq_tau(ns,i,k)     + ice_tau(ns,i,k)
+               cld_tau_w(ns,i,k)   =  liq_tau_w(ns,i,k)   + ice_tau_w(ns,i,k)
+               cld_tau_w_g(ns,i,k) =  liq_tau_w_g(ns,i,k) + ice_tau_w_g(ns,i,k)
+            end do
          end do
       end do
-   end do
+   end if
 
    ! snow
-   if (do_snow) then
+   if (errflg == 0 .and. do_snow) then
       call interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, asm_sw_ice, ssa_sw_ice, icswpth, des, g_d_eff, &
            snow_tau_r, snow_tau_w, snow_tau_w_g, sw_tau_w_f, errmsg, errflg)
-      if (errflg /= 0) then
-         return
-      end if
    end if
 
    ! graupel
-   if (do_graupel) then
+   if (errflg == 0 .and. do_graupel) then
       call get_grau_optics_sw(ncol, pver, nswbands, tiny_in, g_d_eff, ext_sw_ice, asm_sw_ice, ssa_sw_ice, iulog, icgrauwpth, &
            degrau, idx_sw_diag, grau_tau_r, grau_tau_w, grau_tau_w_g, sw_tau_w_f, ngrau_warn, errmsg, errflg)
-      if (errflg /= 0) then
-         return
-      end if
    end if
 
-   ! Combine with snow and graupel, and re-order the cloud optical properties
-   ! from the RRTMG spectral bands (assumed in the optics datasets) to RRTMGP's:
-   ! band ns of the outputs is band rrtmg_to_rrtmgp_swbands(ns) of the above.
-   do k = 1, pver
-      do i = 1, ncol
-         do ns = 1, nswbands
-            pb = rrtmg_to_rrtmgp_swbands(ns)
-            ctau     = cld_tau(pb,i,k)
-            ctau_w   = cld_tau_w(pb,i,k)
-            ctau_w_g = cld_tau_w_g(pb,i,k)
-            if (do_snow) then
-               if (cldfprime(i,k) > 0._kind_phys) then
-                  ctau     = ( cldfsnow(i,k)*snow_tau_r(pb,i,k) &
-                             + cld(i,k)*ctau )/cldfprime(i,k)
-                  ctau_w   = ( cldfsnow(i,k)*snow_tau_w(pb,i,k)  &
-                             + cld(i,k)*ctau_w )/cldfprime(i,k)
-                  ctau_w_g = ( cldfsnow(i,k)*snow_tau_w_g(pb,i,k) &
-                             + cld(i,k)*ctau_w_g )/cldfprime(i,k)
+   if (errflg == 0) then
+      ! Combine with snow and graupel, and re-order the cloud optical properties
+      ! from the RRTMG spectral bands (assumed in the optics datasets) to RRTMGP's:
+      ! band ns of the outputs is band rrtmg_to_rrtmgp_swbands(ns) of the above.
+      !$acc parallel loop gang vector collapse(3) default(present) private(pb, ctau, ctau_w, ctau_w_g)
+      do k = 1, pver
+         do i = 1, ncol
+            do ns = 1, nswbands
+               pb = bandmap(ns)
+               ctau     = cld_tau(pb,i,k)
+               ctau_w   = cld_tau_w(pb,i,k)
+               ctau_w_g = cld_tau_w_g(pb,i,k)
+               if (do_snow) then
+                  if (cldfprime(i,k) > 0._kind_phys) then
+                     ctau     = ( cldfsnow(i,k)*snow_tau_r(pb,i,k) &
+                                + cld(i,k)*ctau )/cldfprime(i,k)
+                     ctau_w   = ( cldfsnow(i,k)*snow_tau_w(pb,i,k)  &
+                                + cld(i,k)*ctau_w )/cldfprime(i,k)
+                     ctau_w_g = ( cldfsnow(i,k)*snow_tau_w_g(pb,i,k) &
+                                + cld(i,k)*ctau_w_g )/cldfprime(i,k)
+                  else
+                     ctau     = 0._kind_phys
+                     ctau_w   = 0._kind_phys
+                     ctau_w_g = 0._kind_phys
+                  end if
+                  snow_tau(ns,i,k) = snow_tau_r(pb,i,k)
                else
-                  ctau     = 0._kind_phys
-                  ctau_w   = 0._kind_phys
-                  ctau_w_g = 0._kind_phys
+                  snow_tau(ns,i,k) = 0._kind_phys
                end if
-               snow_tau(ns,i,k) = snow_tau_r(pb,i,k)
-            else
-               snow_tau(ns,i,k) = 0._kind_phys
-            end if
-            if (do_graupel) then
-               if (cldfprime(i,k) > 0._kind_phys) then
-                  ctau     = ( cldfgrau(i,k)*grau_tau_r(pb,i,k) &
-                             + cld(i,k)*ctau )/cldfprime(i,k)
-                  ctau_w   = ( cldfgrau(i,k)*grau_tau_w(pb,i,k)  &
-                             + cld(i,k)*ctau_w )/cldfprime(i,k)
-                  ctau_w_g = ( cldfgrau(i,k)*grau_tau_w_g(pb,i,k) &
-                             + cld(i,k)*ctau_w_g )/cldfprime(i,k)
+               if (do_graupel) then
+                  if (cldfprime(i,k) > 0._kind_phys) then
+                     ctau     = ( cldfgrau(i,k)*grau_tau_r(pb,i,k) &
+                                + cld(i,k)*ctau )/cldfprime(i,k)
+                     ctau_w   = ( cldfgrau(i,k)*grau_tau_w(pb,i,k)  &
+                                + cld(i,k)*ctau_w )/cldfprime(i,k)
+                     ctau_w_g = ( cldfgrau(i,k)*grau_tau_w_g(pb,i,k) &
+                                + cld(i,k)*ctau_w_g )/cldfprime(i,k)
+                  else
+                     ctau     = 0._kind_phys
+                     ctau_w   = 0._kind_phys
+                     ctau_w_g = 0._kind_phys
+                  end if
+                  grau_tau(ns,i,k) = grau_tau_r(pb,i,k)
                else
-                  ctau     = 0._kind_phys
-                  ctau_w   = 0._kind_phys
-                  ctau_w_g = 0._kind_phys
+                  grau_tau(ns,i,k) = 0._kind_phys
                end if
-               grau_tau(ns,i,k) = grau_tau_r(pb,i,k)
-            else
-               grau_tau(ns,i,k) = 0._kind_phys
-            end if
-            c_cld_tau(ns,i,k)     = ctau
-            c_cld_tau_w(ns,i,k)   = ctau_w
-            c_cld_tau_w_g(ns,i,k) = ctau_w_g
+               c_cld_tau(ns,i,k)     = ctau
+               c_cld_tau_w(ns,i,k)   = ctau_w
+               c_cld_tau_w_g(ns,i,k) = ctau_w_g
+            end do
          end do
       end do
-   end do
 
-   ! Set arrays for diagnostic output.
-   ! cloud optical depth fields for the visible band (idx_sw_diag, RRTMGP order)
-   pb = rrtmg_to_rrtmgp_swbands(idx_sw_diag)
-   do k = 1, pver
-      do i = 1, ncol
-         tot_icld_vistau(i,k) = c_cld_tau(idx_sw_diag,i,k)
-         liq_icld_vistau(i,k) = liq_tau(pb,i,k)
-         ice_icld_vistau(i,k) = ice_tau(pb,i,k)
-         snow_icld_vistau(i,k) = snow_tau(idx_sw_diag,i,k)
-         grau_icld_vistau(i,k) = grau_tau(idx_sw_diag,i,k)
-         ! multiply by total cloud fraction to get gridbox value
-         tot_cld_vistau(i,k) = c_cld_tau(idx_sw_diag,i,k)*cldfprime(i,k)
+      ! Set arrays for diagnostic output.
+      ! cloud optical depth fields for the visible band (idx_sw_diag, RRTMGP order)
+      pb = rrtmg_to_rrtmgp_swbands(idx_sw_diag)
+      !$acc parallel loop gang vector collapse(2) default(present)
+      do k = 1, pver
+         do i = 1, ncol
+            tot_icld_vistau(i,k) = c_cld_tau(idx_sw_diag,i,k)
+            liq_icld_vistau(i,k) = liq_tau(pb,i,k)
+            ice_icld_vistau(i,k) = ice_tau(pb,i,k)
+            snow_icld_vistau(i,k) = snow_tau(idx_sw_diag,i,k)
+            grau_icld_vistau(i,k) = grau_tau(idx_sw_diag,i,k)
+            ! multiply by total cloud fraction to get gridbox value
+            tot_cld_vistau(i,k) = c_cld_tau(idx_sw_diag,i,k)*cldfprime(i,k)
+         end do
       end do
-   end do
 
-   ! overwrite night columns with fillvalue
-   do k = 1, pver
-      do i = 1, nnite
-         tot_cld_vistau(idxnite(i),k)   = fillvalue
-         tot_icld_vistau(idxnite(i),k)  = fillvalue
-         liq_icld_vistau(idxnite(i),k)  = fillvalue
-         ice_icld_vistau(idxnite(i),k)  = fillvalue
-         snow_icld_vistau(idxnite(i),k) = fillvalue
-         grau_icld_vistau(idxnite(i),k) = fillvalue
+      ! overwrite night columns with fillvalue
+      !$acc parallel loop gang vector collapse(2) default(present)
+      do k = 1, pver
+         do i = 1, nnite
+            tot_cld_vistau(idxnite(i),k)   = fillvalue
+            tot_icld_vistau(idxnite(i),k)  = fillvalue
+            liq_icld_vistau(idxnite(i),k)  = fillvalue
+            ice_icld_vistau(idxnite(i),k)  = fillvalue
+            snow_icld_vistau(idxnite(i),k) = fillvalue
+            grau_icld_vistau(idxnite(i),k) = fillvalue
+         end do
       end do
-   end do
+   end if
+
+   !$acc end data
 
 end subroutine rrtmgp_sw_cloud_optics_run
 
@@ -317,6 +333,7 @@ subroutine get_grau_optics_sw(ncol, pver, nswbands, tiny_in, g_d_eff, ext_sw_ice
 
    ! Count the cells to warn about; write the warnings only if there are any.
    nwarn = 0
+   !$acc parallel loop gang vector collapse(2) default(present) reduction(+:nwarn)
    do k = 1, pver
       do i = 1, ncol
          if (tau(idx_sw_diag,i,k).gt.100._kind_phys) then
@@ -325,6 +342,7 @@ subroutine get_grau_optics_sw(ncol, pver, nswbands, tiny_in, g_d_eff, ext_sw_ice
       enddo
    enddo
    if (nwarn > 0) then
+      !$acc update self(tau, icgrauwpth, degrau)
       do i = 1, ncol
          do k = 1, pver
             if (tau(idx_sw_diag,i,k).gt.100._kind_phys) then
@@ -367,6 +385,7 @@ subroutine get_liquid_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_liq, asm_s
    integer,            intent(out) :: errflg
 
    integer :: i, k, swband
+   integer :: nmu_l, nlambda_l
    integer :: mu_m, mu_p, lam_m, lam_p, ierr, ierr_max
    real(kind_phys) :: mu_ws, mu_wn, lam_ws, lam_wn
    real(kind_phys) :: ext, ssa, asm
@@ -377,14 +396,19 @@ subroutine get_liquid_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_liq, asm_s
    ! For each cell: weights in mu (pgam), then in lambda (lamc) on the
    ! lambda row interpolated to that mu, then the bilinear table lookups
    ! (as get_mu_lambda_weights_ccpp and lininterp do).
+   ! Table sizes as local scalars for the device
+   nmu_l = nmu
+   nlambda_l = nlambda
    ierr_max = 0
+   !$acc parallel loop gang vector collapse(2) default(present) reduction(max:ierr_max) &
+   !$acc   private(mu_m, mu_p, lam_m, lam_p, ierr, mu_ws, mu_wn, lam_ws, lam_wn, ext, ssa, asm)
    do k = 1,pver
       do i = 1,ncol
          ! lamc <= 0 seems to be clue from microphysics of no cloud
          if (lamc(i,k) > 0._kind_phys .and. .not. (iclwpth(i,k) < tiny_in)) then
-            call interp_point_wgts(g_mu, nmu, pgam(i,k), mu_m, mu_p, mu_ws, mu_wn, ierr)
+            call interp_point_wgts(g_mu, nmu_l, pgam(i,k), mu_m, mu_p, mu_ws, mu_wn, ierr)
             if (ierr == 0) then
-               call interp_point_wgts_blend(g_lambda, nlambda, mu_m, mu_p, mu_ws, mu_wn, &
+               call interp_point_wgts_blend(g_lambda, nlambda_l, mu_m, mu_p, mu_ws, mu_wn, &
                        lamc(i,k), lam_m, lam_p, lam_ws, lam_wn, ierr)
             end if
             ierr_max = max(ierr_max, ierr)
@@ -392,6 +416,7 @@ subroutine get_liquid_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_liq, asm_s
             ierr = -1
          end if
          if (ierr == 0) then
+            !$acc loop seq
             do swband = 1, nswbands
                ext = interp_point_2d(ext_sw_liq(:,:,swband), &
                        mu_m, mu_p, mu_ws, mu_wn, lam_m, lam_p, lam_ws, lam_wn)
@@ -406,6 +431,7 @@ subroutine get_liquid_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_liq, asm_s
                tau_w_f(swband,i,k) = tau_w_g(swband,i,k) * asm
             end do
          else
+            !$acc loop seq
             do swband = 1, nswbands
                tau(swband,i,k) = 0._kind_phys
                tau_w(swband,i,k) = 0._kind_phys
@@ -458,6 +484,8 @@ subroutine interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, 
   n_g_d = size(g_d_eff)
 
   ierr_max = 0
+  !$acc parallel loop gang vector collapse(2) default(present) reduction(max:ierr_max) &
+  !$acc   private(jjm, jjp, ierr, wgts, wgtn, ext, ssa, asm)
   do k = 1,pver
      do i = 1,ncol
         if( iciwpth(i,k) < tiny_in .or. dei(i,k) == 0._kind_phys) then
@@ -470,6 +498,7 @@ subroutine interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, 
         endif
         if (ierr == 0) then
            ! interpolate into grid and extract radiative properties
+           !$acc loop seq
            do swband = 1, nswbands
               ext = interp_point_1d(ext_sw_ice(:,swband), jjm, jjp, wgts, wgtn)
               ssa = interp_point_1d(ssa_sw_ice(:,swband), jjm, jjp, wgts, wgtn)
@@ -480,6 +509,7 @@ subroutine interpolate_ice_optics_sw(ncol, pver, nswbands, tiny_in, ext_sw_ice, 
               tau_w_f(swband,i,k) = tau_w_g(swband,i,k) * asm
            end do
         else
+           !$acc loop seq
            do swband = 1, nswbands
               tau    (swband,i,k) = 0._kind_phys
               tau_w  (swband,i,k) = 0._kind_phys
@@ -603,6 +633,9 @@ subroutine slingo_liq_optics_sw(ncol, pver, nswbands, cldn, rel, iclwpth, liq_ta
    integer :: ns, i, k
    integer :: indxsl(nswbands)
    real(kind_phys) :: tmp1l, tmp2l, tmp3l, g
+   ! coefficients of each band (abarl(indxsl(ns)), ...), for the device
+   real(kind_phys) :: abarl_b(nswbands), bbarl_b(nswbands), cbarl_b(nswbands)
+   real(kind_phys) :: dbarl_b(nswbands), ebarl_b(nswbands), fbarl_b(nswbands)
 
    ! Set error variables
    errmsg = ''
@@ -613,17 +646,29 @@ subroutine slingo_liq_optics_sw(ncol, pver, nswbands, cldn, rel, iclwpth, liq_ta
       return
    end if
 
+   do ns = 1, nswbands
+      abarl_b(ns) = abarl(indxsl(ns))
+      bbarl_b(ns) = bbarl(indxsl(ns))
+      cbarl_b(ns) = cbarl(indxsl(ns))
+      dbarl_b(ns) = dbarl(indxsl(ns))
+      ebarl_b(ns) = ebarl(indxsl(ns))
+      fbarl_b(ns) = fbarl(indxsl(ns))
+   end do
+
+   !$acc parallel loop gang vector collapse(3) default(present)                     &
+   !$acc   copyin(abarl_b, bbarl_b, cbarl_b, dbarl_b, ebarl_b, fbarl_b)            &
+   !$acc   private(abarli, bbarli, cbarli, dbarli, ebarli, fbarli, tmp1l, tmp2l, tmp3l, g)
    do k=1,pver
       do i=1,ncol
          do ns = 1, nswbands
             ! Set cloud extinction optical depth, single scatter albedo,
             ! asymmetry parameter, and forward scattered fraction:
-            abarli = abarl(indxsl(ns))
-            bbarli = bbarl(indxsl(ns))
-            cbarli = cbarl(indxsl(ns))
-            dbarli = dbarl(indxsl(ns))
-            ebarli = ebarl(indxsl(ns))
-            fbarli = fbarl(indxsl(ns))
+            abarli = abarl_b(ns)
+            bbarli = bbarl_b(ns)
+            cbarli = cbarl_b(ns)
+            dbarli = dbarl_b(ns)
+            ebarli = ebarl_b(ns)
+            fbarli = fbarl_b(ns)
 
             ! note that optical properties for liquid valid only
             ! in range of 4.2 > rel > 16 micron (Slingo 89)
@@ -705,6 +750,9 @@ subroutine ec_ice_optics_sw(ncol, pver, nswbands, cldn, rei, iciwpth, ice_tau, i
    integer :: ns, i, k
    integer :: indxsl(nswbands)
    real(kind_phys) :: tmp1i, tmp2i, tmp3i, g
+   ! coefficients of each band (abari(indxsl(ns)), ...), for the device
+   real(kind_phys) :: abari_b(nswbands), bbari_b(nswbands), cbari_b(nswbands)
+   real(kind_phys) :: dbari_b(nswbands), ebari_b(nswbands), fbari_b(nswbands)
 
    ! Set error variables
    errmsg = ''
@@ -715,15 +763,27 @@ subroutine ec_ice_optics_sw(ncol, pver, nswbands, cldn, rei, iciwpth, ice_tau, i
       return
    end if
 
+   do ns = 1, nswbands
+      abari_b(ns) = abari(indxsl(ns))
+      bbari_b(ns) = bbari(indxsl(ns))
+      cbari_b(ns) = cbari(indxsl(ns))
+      dbari_b(ns) = dbari(indxsl(ns))
+      ebari_b(ns) = ebari(indxsl(ns))
+      fbari_b(ns) = fbari(indxsl(ns))
+   end do
+
+   !$acc parallel loop gang vector collapse(3) default(present)                     &
+   !$acc   copyin(abari_b, bbari_b, cbari_b, dbari_b, ebari_b, fbari_b)            &
+   !$acc   private(abarii, bbarii, cbarii, dbarii, ebarii, fbarii, tmp1i, tmp2i, tmp3i, g)
    do k=1,pver
       do i=1,ncol
          do ns = 1, nswbands
-            abarii = abari(indxsl(ns))
-            bbarii = bbari(indxsl(ns))
-            cbarii = cbari(indxsl(ns))
-            dbarii = dbari(indxsl(ns))
-            ebarii = ebari(indxsl(ns))
-            fbarii = fbari(indxsl(ns))
+            abarii = abari_b(ns)
+            bbarii = bbari_b(ns)
+            cbarii = cbari_b(ns)
+            dbarii = dbari_b(ns)
+            ebarii = ebari_b(ns)
+            fbarii = fbari_b(ns)
 
             ! note that optical properties for ice valid only
             ! in range of 13 > rei > 130 micron (Ebert and Curry 92)
