@@ -86,8 +86,10 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
      ! Local variables
      real(kind_phys) :: tref_min
      real(kind_phys) :: tref_max
+     real(kind_phys) :: pint_min1, pint_min2
      integer :: idx, kdx, iband
-     logical :: ltrick_rrtmgp
+     integer :: band_kind(nswbands)  ! 1: visible, 2: near-infrared, 3: straddles both
+     logical :: ltrick_rrtmgp, all_layers
 
      ! Set error variables
      errmsg = ''
@@ -109,26 +111,39 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
      !
      ! These conditions are generally only satisfied in a non-MPAS MT configuration
      !------------------------------------------------------------------------------
-     if (( trick_rrtmgp ) .and. &
-          (nlay==pverp) .and. &
-          (minval(pint(:,1)) < 1._kind_phys) .and. &
-          (minval(pint(:,2)) > 1._kind_phys) ) then
+     ltrick_rrtmgp = .false.
+     if (trick_rrtmgp .and. (nlay==pverp)) then
+        ! minval(pint(:,1)) and minval(pint(:,2)), on the device (min is exact
+        ! in any order)
+        pint_min1 = huge(1._kind_phys)
+        pint_min2 = huge(1._kind_phys)
+        !$acc parallel loop default(present) reduction(min:pint_min1, pint_min2)
+        do idx = 1, size(pint, 1)
+           pint_min1 = min(pint_min1, pint(idx,1))
+           pint_min2 = min(pint_min2, pint(idx,2))
+        end do
         ! we can and need to trick rrtmgp
-        ltrick_rrtmgp = .true.
-     else
-        ! we cannot or don't need to trick rrtmgp
-        ltrick_rrtmgp = .false.
+        ltrick_rrtmgp = (pint_min1 < 1._kind_phys) .and. (pint_min2 > 1._kind_phys)
      end if
 
      ! RRTMGP set state
-     t_sfc = sqrt(sqrt(lwup(:)/stebol))  ! Surface temp set based on longwave up flux.
+     ! Surface temp set based on longwave up flux.
+     !$acc parallel loop default(present)
+     do idx = 1, size(t_sfc)
+        t_sfc(idx) = sqrt(sqrt(lwup(idx)/stebol))
+     end do
 
      ! Set surface emissivity to 1.0.
      ! The land model *does* have its own surface emissivity, but is not spectrally resolved.
      ! The LW upward flux is calculated with that land emissivity, and the "radiative temperature"
      ! t_sfc is derived from that flux. We assume, therefore, that the emissivity is unity
      ! to be consistent with t_sfc.
-     emis_sfc(:,:) = 1._kind_phys
+     !$acc parallel loop collapse(2) default(present)
+     do idx = 1, size(emis_sfc, 2)
+        do iband = 1, size(emis_sfc, 1)
+           emis_sfc(iband,idx) = 1._kind_phys
+        end do
+     end do
 
      !-------------------------------------------------------------------------
      ! RRTMGP enforces  P > 1 Pa for validity.
@@ -150,51 +165,81 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
      ! Note in Case 2, tops of {t,pint,pmid}_rad start at a 'valid' level,
      ! i.e. pref > p_top_for_rrtmgp
      !-------------------------------------------------------
-     t_rad(:,ktoprad:) = t(:,ktopcam:)
-     pmid_rad(:,ktoprad:) = pmid(:,ktopcam:)
-     pint_rad(:,ktoprad:) = pint(:,ktopcam:)
+     !$acc parallel loop collapse(2) default(present)
+     do kdx = ktoprad, size(t_rad, 2)
+        do idx = 1, size(t_rad, 1)
+           t_rad(idx,kdx)    = t(idx,kdx-ktoprad+ktopcam)
+           pmid_rad(idx,kdx) = pmid(idx,kdx-ktoprad+ktopcam)
+        end do
+     end do
+     !$acc parallel loop collapse(2) default(present)
+     do kdx = ktoprad, size(pint_rad, 2)
+        do idx = 1, size(pint_rad, 1)
+           pint_rad(idx,kdx) = pint(idx,kdx-ktoprad+ktopcam)
+        end do
+     end do
 
      ! Deal with vertical grid for RRTMGP 
-     if (nlay == pverp) then
-        ! All model layers are within RRTMGP's range of valid pressures
-        ! as specified by p_top_for_equil_rad - (Case 1 above)
-        t_rad(:,1)      = t(:,1)
-        if (ltrick_rrtmgp) then
-           ! The top reference pressure from the RRTMGP coefficients datasets is 1.005183574463 Pa
-           ! Set the top of the extra layer just below that.
-           pint_rad(:,1) = 1.01_kind_phys
-           pint_rad(:,2) = 1.02_kind_phys
-           ! set the highest pmid (in the "extra layer") to the midpoint (guarantees > 1Pa)
-           pmid_rad(:,1)   = 1.015_kind_phys ! pint_rad(:,1) + 0.5_kind_phys * (pint_rad(:,2) - pint_rad(:,1))
-           pmid_rad(:,2)   = 0.5_kind_phys*(pint_rad(:,2) + pint_rad(:,3))
+     ! Case 1 (nlay == pverp): all model layers are within RRTMGP's range of
+     ! valid pressures as specified by p_top_for_equil_rad.
+     ! Case 2 (nlay < pverp): model min(pref) < p_top_for_rrtmgp.
+     all_layers = (nlay == pverp)
+     !$acc parallel loop default(present)
+     do idx = 1, size(t_rad, 1)
+        if (all_layers) then
+           t_rad(idx,1)      = t(idx,1)
+           if (ltrick_rrtmgp) then
+              ! The top reference pressure from the RRTMGP coefficients datasets is 1.005183574463 Pa
+              ! Set the top of the extra layer just below that.
+              pint_rad(idx,1) = 1.01_kind_phys
+              pint_rad(idx,2) = 1.02_kind_phys
+              ! set the highest pmid (in the "extra layer") to the midpoint (guarantees > 1Pa)
+              pmid_rad(idx,1)   = 1.015_kind_phys ! pint_rad(:,1) + 0.5_kind_phys * (pint_rad(:,2) - pint_rad(:,1))
+              pmid_rad(idx,2)   = 0.5_kind_phys*(pint_rad(idx,2) + pint_rad(idx,3))
+           else
+              ! The top reference pressure from the RRTMGP coefficients datasets is 1.005183574463 Pa
+              ! Set the top of the extra layer just below that.
+              pint_rad(idx,1) = 1.01_kind_phys
+              ! set the highest pmid (in the "extra layer") to the midpoint (guarantees > 1Pa)
+              pmid_rad(idx,1)   = pint_rad(idx,1) + 0.5_kind_phys * (pint_rad(idx,2) - pint_rad(idx,1))
+           end if
         else
-           ! The top reference pressure from the RRTMGP coefficients datasets is 1.005183574463 Pa
-           ! Set the top of the extra layer just below that.
-           pint_rad(:,1) = 1.01_kind_phys
-           ! set the highest pmid (in the "extra layer") to the midpoint (guarantees > 1Pa)
-           pmid_rad(:,1)   = pint_rad(:,1) + 0.5_kind_phys * (pint_rad(:,2) - pint_rad(:,1))
+           ! Not sure why is this needed since pint_rad should have been specified
+           ! at RRTMGP valid values above. But this is the way it was done in
+           ! original RRTMG implementation.
+           pint_rad(idx,1) = 1.01_kind_phys
+           ! The following *should* work since pint_rad is all in valid range.
+           pmid_rad(idx,1) = 0.5_kind_phys * (pint_rad(idx,1) + pint_rad(idx,2))
         end if
-     else
-        ! nlay < pverp : model min(pref) < p_top_for_rrtmgp  (Case 2 above)
-        ! Not sure why is this needed since pint_rad should have been specified
-        ! at RRTMGP valid values above. But this is the way it was done in
-        ! original RRTMG implementation.
-        pint_rad(:,1) = 1.01_kind_phys
-        ! The following *should* work since pint_rad is all in valid range.
-        pmid_rad(:,1) = 0.5_kind_phys * (pint_rad(:,1) + pint_rad(:,2))
-     end if
+     end do
 
      ! Limit temperatures to be within the limits of RRTMGP validity.
      tref_min = kdist_sw%gas_props%get_temp_min()
      tref_max = kdist_sw%gas_props%get_temp_max()
-     t_rad = merge(t_rad, tref_min, t_rad > tref_min)
-     t_rad = merge(t_rad, tref_max, t_rad < tref_max)
+     !$acc parallel loop collapse(2) default(present)
+     do kdx = 1, size(t_rad, 2)
+        do idx = 1, size(t_rad, 1)
+           t_rad(idx,kdx) = merge(t_rad(idx,kdx), tref_min, t_rad(idx,kdx) > tref_min)
+           t_rad(idx,kdx) = merge(t_rad(idx,kdx), tref_max, t_rad(idx,kdx) < tref_max)
+        end do
+     end do
 
      ! Construct arrays containing only daylight columns
+     !$acc parallel loop collapse(2) default(present)
+     do kdx = 1, size(t_day, 2)
+        do idx = 1, nday
+           t_day(idx,kdx)    = t_rad(idxday(idx),kdx)
+           pmid_day(idx,kdx) = pmid_rad(idxday(idx),kdx)
+        end do
+     end do
+     !$acc parallel loop collapse(2) default(present)
+     do kdx = 1, size(pint_day, 2)
+        do idx = 1, nday
+           pint_day(idx,kdx) = pint_rad(idxday(idx),kdx)
+        end do
+     end do
+     !$acc parallel loop default(present)
      do idx = 1, nday
-        t_day(idx,:)    = t_rad(idxday(idx),:)
-        pmid_day(idx,:) = pmid_rad(idxday(idx),:)
-        pint_day(idx,:) = pint_rad(idxday(idx),:)
         coszrs_day(idx) = coszrs(idxday(idx))
      end do
 
@@ -204,47 +249,53 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
      ! are categorized broadly as "visible/UV" or "infrared" based on wavenumber.
      ! Loop over bands, and determine for each band whether it is broadly in the
      ! visible or infrared part of the spectrum based on a dividing line of
-     ! 0.7 micron, or 14286 cm^-1
+     ! 0.7 micron, or 14286 cm^-1 (on the host: the band bounds only)
      do iband = 1,nswbands
         if (is_visible(sw_low_bounds(iband)) .and. &
            is_visible(sw_high_bounds(iband))) then
-
            ! Entire band is in the visible
-           do idx = 1, nday
-              alb_dir(iband,idx) = asdir(idxday(idx))
-              alb_dif(iband,idx) = asdif(idxday(idx))
-           end do
-
+           band_kind(iband) = 1
         else if (.not.is_visible(sw_low_bounds(iband)) .and. &
                  .not.is_visible(sw_high_bounds(iband))) then
            ! Entire band is in the longwave (near-infrared)
-           do idx = 1, nday
-              alb_dir(iband,idx) = aldir(idxday(idx))
-              alb_dif(iband,idx) = aldif(idxday(idx))
-           end do
+           band_kind(iband) = 2
         else
            ! Band straddles the visible to near-infrared transition, so we take
            ! the albedo to be the average of the visible and near-infrared
            ! broadband albedos
-           do idx = 1, nday
-              alb_dir(iband,idx) = 0.5_kind_phys * (aldir(idxday(idx)) + asdir(idxday(idx)))
-              alb_dif(iband,idx) = 0.5_kind_phys * (aldif(idxday(idx)) + asdif(idxday(idx)))
-           end do
+           band_kind(iband) = 3
         end if
      end do
+     !$acc parallel loop collapse(2) default(present) copyin(band_kind)
+     do idx = 1, nday
+        do iband = 1, nswbands
+           if (band_kind(iband) == 1) then
+              alb_dir(iband,idx) = asdir(idxday(idx))
+              alb_dif(iband,idx) = asdif(idxday(idx))
+           else if (band_kind(iband) == 2) then
+              alb_dir(iband,idx) = aldir(idxday(idx))
+              alb_dif(iband,idx) = aldif(idxday(idx))
+           else
+              alb_dir(iband,idx) = 0.5_kind_phys * (aldir(idxday(idx)) + asdir(idxday(idx)))
+              alb_dif(iband,idx) = 0.5_kind_phys * (aldif(idxday(idx)) + asdif(idxday(idx)))
+           end if
+        end do
+     end do
      ! Strictly enforce albedo bounds
-     where (alb_dir < 0)
-        alb_dir = 0.0_kind_phys
-     end where
-     where (alb_dir > 1)
-        alb_dir = 1.0_kind_phys
-     end where
-     where (alb_dif < 0)
-        alb_dif = 0.0_kind_phys
-     end where
-     where (alb_dif > 1)
-        alb_dif = 1.0_kind_phys
-     end where
+     !$acc parallel loop collapse(2) default(present)
+     do idx = 1, size(alb_dir, 2)
+        do iband = 1, size(alb_dir, 1)
+           if (alb_dir(iband,idx) < 0) alb_dir(iband,idx) = 0.0_kind_phys
+           if (alb_dir(iband,idx) > 1) alb_dir(iband,idx) = 1.0_kind_phys
+        end do
+     end do
+     !$acc parallel loop collapse(2) default(present)
+     do idx = 1, size(alb_dif, 2)
+        do iband = 1, size(alb_dif, 1)
+           if (alb_dif(iband,idx) < 0) alb_dif(iband,idx) = 0.0_kind_phys
+           if (alb_dif(iband,idx) > 1) alb_dif(iband,idx) = 1.0_kind_phys
+        end do
+     end do
 
      ! modified cloud fraction
      ! Compute modified cloud fraction, cldfprime.
@@ -253,16 +304,23 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
      ! 3. modify for graupel if graupel_in_rad is true.
      !    use max(cldfprime, cldfgrau)
      if (do_snow) then
+        !$acc parallel loop collapse(2) default(present)
         do kdx = 1, pver
            do idx = 1, ncol
               cldfprime(idx,kdx) = max(cld(idx,kdx), cldfsnow(idx,kdx))
            end do
         end do
      else
-        cldfprime(:,:) = cld(:,:)
+        !$acc parallel loop collapse(2) default(present)
+        do kdx = 1, size(cldfprime, 2)
+           do idx = 1, size(cldfprime, 1)
+              cldfprime(idx,kdx) = cld(idx,kdx)
+           end do
+        end do
      end if
 
      if (do_graupel .and. graupel_in_rad) then
+        !$acc parallel loop collapse(2) default(present)
         do kdx = 1, pver
            do idx = 1, ncol
               cldfprime(idx,kdx) = max(cldfprime(idx,kdx), cldfgrau(idx,kdx))
