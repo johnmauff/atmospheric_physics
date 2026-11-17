@@ -159,6 +159,11 @@ contains
     nlambda = size(g_lambda, 2)
     n_g_d = size(g_d_eff)
 
+    ! The cloud optics schemes run on the GPU and read the tables there;
+    ! they stay on the device for the whole run.
+    !$acc enter data copyin(g_mu, g_lambda, abs_lw_liq, ext_sw_liq, asm_sw_liq, ssa_sw_liq, &
+    !$acc                   g_d_eff, abs_lw_ice, ext_sw_ice, asm_sw_ice, ssa_sw_ice)
+
   end subroutine rrtmgp_cloud_optics_setup_init
 
 !==============================================================================

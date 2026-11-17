@@ -69,7 +69,7 @@ contains
     integer,                           intent(out) :: errflg
 
     ! Local variables
-    integer :: idx, kdx
+    integer :: idx, kdx, lwband
 
     ! cloud radiative parameters are "in cloud" not "in cell"
     real(kind_phys) :: liq_lw_abs(nlwbands, ncol, pver)   ! liquid absorption optics depth (LW)
@@ -87,86 +87,127 @@ contains
        return
     end if
 
+    ! Check the parameterization selectors on the host, before the data region
+    if (trim(liq_cld_optics) /= 'slingo' .and. trim(liq_cld_optics) /= 'gammadist') then
+       write(errmsg,'(a,a)') sub, ': liq_cld_optics must be either slingo or gammadist'
+       errflg = 1
+       return
+    end if
+    if (trim(ice_cld_optics) /= 'ebertcurry' .and. trim(ice_cld_optics) /= 'mitchell') then
+       write(errmsg,'(a,a)') sub, ': ice_cld_optics must be either ebertcurry or mitchell'
+       errflg = 1
+       return
+    end if
+
+    !$acc data copyin(cld, cldfsnow, cldfgrau, cldfprime, lamc, pgam, rei, iclwpth, iciwpth, &
+    !$acc             dei, icswpth, des, icgrauwpth, degrau)                               &
+    !$acc      copyout(cld_lw_abs, snow_lw_abs, grau_lw_abs, c_cld_lw_abs)                 &
+    !$acc      create(liq_lw_abs, ice_lw_abs)
+
     ! Combine the cloud optical properties.
     ! Note: mix-match slingo/ebertcurry with gammadist/mitchell is NOT supported.
     !       the CAM4-era slingo/ebertcurry longwave absorptions each apply
     !       their coefficient to the TOTAL (liquid+ice) water path weighted by the
     !       ice fraction, so their sum reproduces the CAM4 total only when used as a pair.
-    select case (trim(liq_cld_optics))
-    case ('slingo')
+    if (trim(liq_cld_optics) == 'slingo') then
        ! Slingo liquid optics (CAM4-era broadband liquid absorption)
        call slingo_liq_get_rad_props_lw(ncol, pver, nlwbands, iclwpth, iciwpth, liq_lw_abs)
-    case ('gammadist')
+    else
        ! gammadist liquid optics
        call liquid_cloud_get_rad_props_lw(ncol, pver, nmu, nlambda, nlwbands, lamc, pgam, g_mu, g_lambda, iclwpth, &
                abs_lw_liq, tiny_in, liq_lw_abs, errmsg, errflg)
-    case default
-       write(errmsg,'(a,a)') sub, ': liq_cld_optics must be either slingo or gammadist'
-       errflg = 1
-    end select
-    if (errflg /= 0) then
-       return
     end if
 
-    select case (trim(ice_cld_optics))
-    case ('ebertcurry')
-       ! Ebert and Curry (1992) ice optics
-       call ec_ice_get_rad_props_lw(ncol, pver, nlwbands, rei, iclwpth, iciwpth, ice_lw_abs)
-    case ('mitchell')
-       ! Mitchell ice optics
-       call interpolate_ice_optics_lw(ncol, pver, nlwbands, iciwpth, dei, &
-               n_g_d, g_d_eff, abs_lw_ice, tiny_in, ice_lw_abs, errmsg, errflg)
-    case default
-       write(errmsg,'(a,a)') sub, ': ice_cld_optics must be either ebertcurry or mitchell'
-       errflg = 1
-    end select
-    if (errflg /= 0) then
-       return
-    end if
-
-    cld_lw_abs(:,:,:) = liq_lw_abs(:,:,:) + ice_lw_abs(:,:,:)
-
-    ! add in snow
-    if (do_snow) then
-       call interpolate_ice_optics_lw(ncol, pver, nlwbands, icswpth, des, &
-               n_g_d, g_d_eff, abs_lw_ice, tiny_in, snow_lw_abs, errmsg, errflg)
-       if (errflg /= 0) then
-          return
+    if (errflg == 0) then
+       if (trim(ice_cld_optics) == 'ebertcurry') then
+          ! Ebert and Curry (1992) ice optics
+          call ec_ice_get_rad_props_lw(ncol, pver, nlwbands, rei, iclwpth, iciwpth, ice_lw_abs)
+       else
+          ! Mitchell ice optics
+          call interpolate_ice_optics_lw(ncol, pver, nlwbands, iciwpth, dei, &
+                  n_g_d, g_d_eff, abs_lw_ice, tiny_in, ice_lw_abs, errmsg, errflg)
        end if
-       do idx = 1, ncol
-          do kdx = 1, pver
-             if (cldfprime(idx,kdx) > 0._kind_phys) then
-                c_cld_lw_abs(:,idx,kdx) = ( cldfsnow(idx,kdx)*snow_lw_abs(:,idx,kdx) &
-                                                 + cld(idx,kdx)*cld_lw_abs(:,idx,kdx) )/cldfprime(idx,kdx)
-             else
-                c_cld_lw_abs(:,idx,kdx) = 0._kind_phys
-             end if
+    end if
+
+    if (errflg == 0) then
+       !$acc parallel loop gang vector collapse(3) default(present)
+       do kdx = 1, pver
+          do idx = 1, ncol
+             do lwband = 1, nlwbands
+                cld_lw_abs(lwband,idx,kdx) = liq_lw_abs(lwband,idx,kdx) + ice_lw_abs(lwband,idx,kdx)
+             end do
           end do
        end do
-    else
-       snow_lw_abs(:,:,:) = 0._kind_phys
-       c_cld_lw_abs(:,:,:) = cld_lw_abs(:,:,:)
+    end if
+
+    ! add in snow
+    if (errflg == 0) then
+       if (do_snow) then
+          call interpolate_ice_optics_lw(ncol, pver, nlwbands, icswpth, des, &
+                  n_g_d, g_d_eff, abs_lw_ice, tiny_in, snow_lw_abs, errmsg, errflg)
+          if (errflg == 0) then
+             !$acc parallel loop gang vector collapse(3) default(present)
+             do kdx = 1, pver
+                do idx = 1, ncol
+                   do lwband = 1, nlwbands
+                      if (cldfprime(idx,kdx) > 0._kind_phys) then
+                         c_cld_lw_abs(lwband,idx,kdx) = ( cldfsnow(idx,kdx)*snow_lw_abs(lwband,idx,kdx) &
+                                                        + cld(idx,kdx)*cld_lw_abs(lwband,idx,kdx) )/cldfprime(idx,kdx)
+                      else
+                         c_cld_lw_abs(lwband,idx,kdx) = 0._kind_phys
+                      end if
+                   end do
+                end do
+             end do
+          end if
+       else
+          !$acc parallel loop gang vector collapse(3) default(present)
+          do kdx = 1, pver
+             do idx = 1, ncol
+                do lwband = 1, nlwbands
+                   snow_lw_abs(lwband,idx,kdx) = 0._kind_phys
+                   c_cld_lw_abs(lwband,idx,kdx) = cld_lw_abs(lwband,idx,kdx)
+                end do
+             end do
+          end do
+       end if
     end if
 
     ! add in graupel
-    if (do_graupel) then
-       call interpolate_ice_optics_lw(ncol, pver, nlwbands, icgrauwpth, degrau, n_g_d, &
-               g_d_eff, abs_lw_ice, tiny_in, grau_lw_abs, errmsg, errflg)
-       if (errflg /= 0) then
-          return
-       end if
-       do idx = 1, ncol
+    if (errflg == 0) then
+       if (do_graupel) then
+          call interpolate_ice_optics_lw(ncol, pver, nlwbands, icgrauwpth, degrau, n_g_d, &
+                  g_d_eff, abs_lw_ice, tiny_in, grau_lw_abs, errmsg, errflg)
+          if (errflg == 0) then
+             !$acc parallel loop gang vector collapse(3) default(present)
+             do kdx = 1, pver
+                do idx = 1, ncol
+                   do lwband = 1, nlwbands
+                      if (cldfprime(idx,kdx) > 0._kind_phys) then
+                         c_cld_lw_abs(lwband,idx,kdx) = ( cldfgrau(idx,kdx)*grau_lw_abs(lwband,idx,kdx) &
+                                                        + cld(idx,kdx)*c_cld_lw_abs(lwband,idx,kdx) )/cldfprime(idx,kdx)
+                      else
+                         c_cld_lw_abs(lwband,idx,kdx) = 0._kind_phys
+                      end if
+                   end do
+                end do
+             end do
+          end if
+       else
+          !$acc parallel loop gang vector collapse(3) default(present)
           do kdx = 1, pver
-             if (cldfprime(idx,kdx) > 0._kind_phys) then
-                c_cld_lw_abs(:,idx,kdx) = ( cldfgrau(idx,kdx)*grau_lw_abs(:,idx,kdx) &
-                                                 + cld(idx,kdx)*c_cld_lw_abs(:,idx,kdx) )/cldfprime(idx,kdx)
-             else
-                c_cld_lw_abs(:,idx,kdx) = 0._kind_phys
-             end if
+             do idx = 1, ncol
+                do lwband = 1, nlwbands
+                   grau_lw_abs(lwband,idx,kdx) = 0._kind_phys
+                end do
+             end do
           end do
-       end do
-    else
-       grau_lw_abs(:,:,:) = 0._kind_phys
+       end if
+    end if
+
+    !$acc end data
+    if (errflg /= 0) then
+       return
     end if
 
     errmsg =cloud_lw%optical_props%alloc_1scl(ncol, nlay, kdist_lw%gas_props)
@@ -183,7 +224,9 @@ contains
 
   subroutine liquid_cloud_get_rad_props_lw(ncol, pver, nmu, nlambda, nlwbands, lamc, pgam, &
                   g_mu, g_lambda, iclwpth, abs_lw_liq, tiny, abs_od, errmsg, errflg)
-    use ccpp_kinds, only: kind_phys
+    use ccpp_kinds,              only: kind_phys
+    use atmos_phys_interp_point, only: interp_point_wgts, interp_point_wgts_blend, &
+                                       interp_point_2d, interp_point_errmsg
     ! Inputs
     integer,                           intent(in) :: ncol
     integer,                           intent(in) :: pver
@@ -202,82 +245,63 @@ contains
     character(len=*),                  intent(out) :: errmsg
     integer,                           intent(out) :: errflg
 
-    integer lwband, idx, kdx
+    integer :: lwband, idx, kdx
+    integer :: mu_m, mu_p, lam_m, lam_p, ierr, ierr_max
+    real(kind_phys) :: mu_ws, mu_wn, lam_ws, lam_wn
 
     ! Set error variables
     errflg = 0
     errmsg = ''
 
-    abs_od = 0._kind_phys
-
+    ! For each cell: weights in mu (pgam), then in lambda (lamc) on the
+    ! lambda row interpolated to that mu, then the bilinear table lookup
+    ! (as get_mu_lambda_weights_ccpp and lininterp do).
+    ierr_max = 0
+    !$acc parallel loop gang vector collapse(2) default(present) reduction(max:ierr_max) &
+    !$acc   private(mu_m, mu_p, lam_m, lam_p, ierr, mu_ws, mu_wn, lam_ws, lam_wn)
     do kdx = 1,pver
        do idx = 1,ncol
-          if(lamc(idx,kdx) > 0._kind_phys) then ! This seems to be the clue for no cloud from microphysics formulation
-             call gam_liquid_lw(nlwbands, nmu, nlambda, iclwpth(idx,kdx), lamc(idx,kdx), pgam(idx,kdx), abs_lw_liq, &
-                     g_mu, g_lambda, tiny, abs_od(1:nlwbands,idx,kdx), errmsg, errflg)
+          ! lamc <= 0 seems to be the clue for no cloud from microphysics formulation
+          if (lamc(idx,kdx) > 0._kind_phys .and. .not. (iclwpth(idx,kdx) < tiny)) then
+             call interp_point_wgts(g_mu, nmu, pgam(idx,kdx), mu_m, mu_p, mu_ws, mu_wn, ierr)
+             if (ierr == 0) then
+                call interp_point_wgts_blend(g_lambda, nlambda, mu_m, mu_p, mu_ws, mu_wn, &
+                        lamc(idx,kdx), lam_m, lam_p, lam_ws, lam_wn, ierr)
+             end if
+             ierr_max = max(ierr_max, ierr)
+             if (ierr == 0) then
+                !$acc loop seq
+                do lwband = 1, nlwbands
+                   abs_od(lwband,idx,kdx) = iclwpth(idx,kdx) * interp_point_2d(              &
+                        abs_lw_liq(:,:,lwband), mu_m, mu_p, mu_ws, mu_wn, &
+                        lam_m, lam_p, lam_ws, lam_wn)
+                end do
+             else
+                !$acc loop seq
+                do lwband = 1, nlwbands
+                   abs_od(lwband,idx,kdx) = 0._kind_phys
+                end do
+             end if
           else
-             abs_od(1:nlwbands,idx,kdx) = 0._kind_phys
+             !$acc loop seq
+             do lwband = 1, nlwbands
+                abs_od(lwband,idx,kdx) = 0._kind_phys
+             end do
           endif
        enddo
     enddo
+    if (ierr_max /= 0) then
+       errmsg = interp_point_errmsg(ierr_max)
+       errflg = 1
+    end if
 
   end subroutine liquid_cloud_get_rad_props_lw
 
 !==============================================================================
 
-  subroutine gam_liquid_lw(nlwbands, nmu, nlambda, clwptn, lamc, pgam, abs_lw_liq, g_mu, g_lambda, tiny, abs_od, errmsg, errflg)
-    use atmos_phys_interp_utils,  only: interp_type, lininterp, lininterp_finish
-    use radiation_utils,          only: get_mu_lambda_weights_ccpp
-    use ccpp_kinds,               only: kind_phys
-    ! Inputs
-    integer,         intent(in) :: nlwbands
-    integer,         intent(in) :: nmu
-    integer,         intent(in) :: nlambda
-    real(kind_phys), intent(in) :: clwptn ! cloud water liquid path new (in cloud) (in g/m^2)?
-    real(kind_phys), intent(in) :: lamc   ! prognosed value of lambda for cloud
-    real(kind_phys), intent(in) :: pgam   ! prognosed value of mu for cloud
-    real(kind_phys), dimension(:,:,:), intent(in) :: abs_lw_liq
-    real(kind_phys), dimension(:),     intent(in) :: g_mu
-    real(kind_phys), dimension(:,:)  , intent(in) :: g_lambda
-    real(kind_phys),                   intent(in) :: tiny
-    ! Outputs
-    real(kind_phys), dimension(:), intent(out) :: abs_od
-    integer,                       intent(out) :: errflg
-    character(len=*),              intent(out) :: errmsg
-    
-    integer :: lwband ! sw band index
-
-    type(interp_type) :: mu_wgts
-    type(interp_type) :: lambda_wgts
-
-    if (clwptn < tiny) then
-      abs_od = 0._kind_phys
-      return
-    endif
-
-    call get_mu_lambda_weights_ccpp(nmu, nlambda, g_mu, g_lambda, lamc, pgam, mu_wgts, lambda_wgts, errmsg, errflg)
-    if (errflg /= 0) then
-       return
-    end if
-
-    do lwband = 1, nlwbands
-       call lininterp(abs_lw_liq(:,:,lwband), nmu, nlambda, &
-            abs_od(lwband:lwband), 1, mu_wgts, lambda_wgts)
-    enddo
-
-    abs_od = clwptn * abs_od
-
-    call lininterp_finish(mu_wgts)
-    call lininterp_finish(lambda_wgts)
-
-  end subroutine gam_liquid_lw
-
-!==============================================================================
-
   subroutine interpolate_ice_optics_lw(ncol, pver, nlwbands, iciwpth, dei, &
                   n_g_d, g_d_eff, abs_lw_ice, tiny, abs_od, errmsg, errflg)
-    use atmos_phys_interp_utils,  only: interp_type, lininterp, lininterp_init, &
-                                        lininterp_finish, extrap_method_bndry
+    use atmos_phys_interp_point,  only: interp_point_wgts, interp_point_1d, interp_point_errmsg
     use ccpp_kinds,               only: kind_phys
 
     integer,           intent(in)                  :: ncol
@@ -293,38 +317,52 @@ contains
     character(len=*), intent(out) :: errmsg
     integer,          intent(out) :: errflg
 
-    type(interp_type) :: dei_wgts
-
     integer :: idx, kdx, lwband
-    real(kind_phys) :: absor(nlwbands)
+    integer :: jjm, jjp, ierr, ierr_max
+    real(kind_phys) :: wgts, wgtn
 
     ! Set error variables
     errflg = 0
     errmsg = ''
 
+    ierr_max = 0
+    !$acc parallel loop gang vector collapse(2) default(present) reduction(max:ierr_max) &
+    !$acc   private(jjm, jjp, ierr, wgts, wgtn)
     do kdx = 1,pver
        do idx = 1,ncol
           ! if ice water path is too small, OD := 0
           if( iciwpth(idx,kdx) < tiny .or. dei(idx,kdx) == 0._kind_phys) then
-             abs_od (:,idx,kdx) = 0._kind_phys
+             !$acc loop seq
+             do lwband = 1, nlwbands
+                abs_od(lwband,idx,kdx) = 0._kind_phys
+             end do
           else
              ! for each cell interpolate to find weights in g_d_eff grid.
-             call lininterp_init(g_d_eff, n_g_d, dei(idx:idx,kdx), 1, &
-                  extrap_method_bndry, dei_wgts, errmsg=errmsg, errflg=errflg)
-             if (errflg /= 0) then
-                return
+             call interp_point_wgts(g_d_eff, n_g_d, dei(idx,kdx), jjm, jjp, wgts, wgtn, ierr)
+             ierr_max = max(ierr_max, ierr)
+             if (ierr == 0) then
+                ! interpolate into grid and extract radiative properties
+                !$acc loop seq
+                do lwband = 1, nlwbands
+                   abs_od(lwband,idx,kdx) = iciwpth(idx,kdx) * &
+                        interp_point_1d(abs_lw_ice(:,lwband), jjm, jjp, wgts, wgtn)
+                   if (abs_od(lwband,idx,kdx) > 50.0_kind_phys) then
+                      abs_od(lwband,idx,kdx) = 50.0_kind_phys
+                   end if
+                enddo
+             else
+                !$acc loop seq
+                do lwband = 1, nlwbands
+                   abs_od(lwband,idx,kdx) = 0._kind_phys
+                end do
              end if
-             ! interpolate into grid and extract radiative properties
-             do lwband = 1, nlwbands
-                call lininterp(abs_lw_ice(:,lwband), n_g_d, &
-                     absor(lwband:lwband), 1, dei_wgts)
-             enddo
-             abs_od(:,idx,kdx) = iciwpth(idx,kdx) * absor
-             where(abs_od(:,idx,kdx) > 50.0_kind_phys) abs_od(:,idx,kdx) = 50.0_kind_phys
-             call lininterp_finish(dei_wgts)
           endif
        enddo
     enddo
+    if (ierr_max /= 0) then
+       errmsg = interp_point_errmsg(ierr_max)
+       errflg = 1
+    end if
 
   end subroutine interpolate_ice_optics_lw
 
@@ -347,30 +385,26 @@ contains
     real(kind_phys), dimension(:,:,:), intent(out) :: abs_od
 
     ! Local variables
-    real(kind_phys) :: ficemr(ncol,pver)
-    real(kind_phys) :: cwp(ncol,pver)
-    real(kind_phys) :: cldtau(ncol,pver)
+    real(kind_phys) :: ficemr
+    real(kind_phys) :: cwp
+    real(kind_phys) :: cldtau
     real(kind_phys) :: kabs
     integer :: lwband, i, k
 
     real(kind_phys), parameter :: kabsl = 0.090361_kind_phys ! longwave liquid absorption coeff (m**2/g)
 
+    !$acc parallel loop gang vector collapse(2) default(present) private(cwp, ficemr, kabs, cldtau)
     do k=1, pver
        do i = 1, ncol
-          cwp   (i,k) = 1000.0_kind_phys * iclwpth(i,k) + 1000.0_kind_phys * iciwpth(i, k)
-          ficemr(i,k) = 1000.0_kind_phys * iciwpth(i,k)/(max(1.e-18_kind_phys, cwp(i,k)))
+          cwp    = 1000.0_kind_phys * iclwpth(i,k) + 1000.0_kind_phys * iciwpth(i, k)
+          ficemr = 1000.0_kind_phys * iciwpth(i,k)/(max(1.e-18_kind_phys, cwp))
+          kabs = kabsl*(1._kind_phys-ficemr)
+          cldtau = kabs*cwp
+          !$acc loop seq
+          do lwband = 1, nlwbands
+             abs_od(lwband,i,k) = cldtau
+          end do
        end do
-    end do
-
-    do k=1, pver
-       do i=1, ncol
-          kabs = kabsl*(1._kind_phys-ficemr(i,k))
-          cldtau(i,k) = kabs*cwp(i,k)
-       end do
-    end do
-
-    do lwband = 1, nlwbands
-       abs_od(lwband,1:ncol,1:pver)=cldtau(1:ncol,1:pver)
     end do
 
   end subroutine slingo_liq_get_rad_props_lw
@@ -393,33 +427,29 @@ contains
     real(kind_phys), dimension(:,:,:), intent(out) :: abs_od
 
     ! Local variables
-    real(kind_phys) :: ficemr(ncol,pver)
-    real(kind_phys) :: cwp(ncol,pver)
-    real(kind_phys) :: cldtau(ncol,pver)
+    real(kind_phys) :: ficemr
+    real(kind_phys) :: cwp
+    real(kind_phys) :: cldtau
     real(kind_phys) :: kabs, kabsi
     integer :: lwband, i, k
 
     real(kind_phys), parameter :: scalefactor = 1._kind_phys
 
+    !$acc parallel loop gang vector collapse(2) default(present) private(cwp, ficemr, kabsi, kabs, cldtau)
     do k=1,pver
        do i = 1,ncol
-          cwp   (i,k) = 1000.0_kind_phys * iciwpth(i,k) + 1000.0_kind_phys * iclwpth(i,k)
-          ficemr(i,k) = 1000.0_kind_phys * iciwpth(i,k)/(max(1.e-18_kind_phys, cwp(i,k)))
-       end do
-    end do
-
-    do k=1,pver
-       do i=1,ncol
+          cwp    = 1000.0_kind_phys * iciwpth(i,k) + 1000.0_kind_phys * iclwpth(i,k)
+          ficemr = 1000.0_kind_phys * iciwpth(i,k)/(max(1.e-18_kind_phys, cwp))
           ! note that optical properties for ice valid only
           ! in range of 13 > rei > 130 micron
           kabsi = 0.005_kind_phys + 1._kind_phys/min(max(13._kind_phys,scalefactor*rei(i,k)),130._kind_phys)
-          kabs =  kabsi*ficemr(i,k) ! kabsl*(1._r8-ficemr(i,k)) + kabsi*ficemr(i,k)
-          cldtau(i,k) = kabs*cwp(i,k)
+          kabs =  kabsi*ficemr ! kabsl*(1._r8-ficemr(i,k)) + kabsi*ficemr(i,k)
+          cldtau = kabs*cwp
+          !$acc loop seq
+          do lwband = 1,nlwbands
+             abs_od(lwband,i,k) = cldtau
+          end do
        end do
-    end do
-
-    do lwband = 1,nlwbands
-       abs_od(lwband,1:ncol,1:pver)=cldtau(1:ncol,1:pver)
     end do
 
   end subroutine ec_ice_get_rad_props_lw
