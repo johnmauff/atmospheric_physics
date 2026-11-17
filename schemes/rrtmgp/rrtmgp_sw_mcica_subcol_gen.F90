@@ -20,7 +20,8 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
    use ccpp_gas_concentrations, only: ty_gas_concs_ccpp
    use ccpp_gas_optics_rrtmgp,  only: ty_gas_optics_rrtmgp_ccpp
    use ccpp_optical_props,      only: ty_optical_props_2str_ccpp
-   use shr_RandNum_mod,         only: ShrKissRandGen ! SIMA-specific randum number generator
+   use iso_fortran_env,         only: int64
+   use atmos_phys_kiss_rng,     only: kiss_rng_seed, kiss_rng_next
 
    ! Compute combined cloud optical properties.
    ! Create MCICA stochastic arrays for cloud SW optical properties.
@@ -50,32 +51,29 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
 
    ! Local variables
 
-   integer :: i, k, n
-   integer :: igpt, nver, isubcol
-   integer :: istat
+   integer :: i, k, n, icol
+   integer :: igpt, isubcol
    integer, parameter :: changeseed = 1
-   character(len=256) :: alloc_errmsg
-   type(ShrKissRandGen) :: kiss_gen  ! KISS RNG object
-   integer  :: kiss_seed(nday,4)
-   real(kind_phys) :: rand_num_1d(nday,1)   ! random number (kissvec)
-   real(kind_phys) :: rand_num(nday,pver-ktopcam+1)   ! random number (kissvec)
-   logical  :: iscloudy(nswgpts,nday,pver-ktopcam+1)   ! flag that says whether a gridbox is cloudy
    real(kind_phys), parameter :: cldmin = 1.0e-80_kind_phys  ! min cloud fraction
-   real(kind_phys) :: cdf(nswgpts,nday,pver-ktopcam+1)
-   real(kind_phys) :: cldfrac(nday,pver-ktopcam+1) ! Cloud fraction clipped to cldmin
 
-   ! Arrays for converting from CAM chunks to RRTMGP inputs.
-   real(kind_phys), allocatable :: cldf(:,:)
-   real(kind_phys), allocatable :: tauc(:,:,:)
-   real(kind_phys), allocatable :: ssac(:,:,:)
-   real(kind_phys), allocatable :: asmc(:,:,:)
-   real(kind_phys), allocatable :: taucmcl(:,:,:)
-   real(kind_phys), allocatable :: ssacmcl(:,:,:)
-   real(kind_phys), allocatable :: asmcmcl(:,:,:)
-   real(kind_phys), allocatable :: day_cld_tau(:,:,:)
-   real(kind_phys), allocatable :: day_cld_tau_w(:,:,:)
-   real(kind_phys), allocatable :: day_cld_tau_w_g(:,:,:)
+   integer :: gpt2band(nswgpts)          ! band of each g-point
+   integer :: kiss_seed1, kiss_seed2, kiss_seed3, kiss_seed4
+   integer(int64) :: s1, s2, s3, s4      ! KISS state of a column
+   real(kind_phys) :: rand_num           ! random number (KISS)
+   real(kind_phys) :: tau_k, tau_w_k, tau_w_g_k, tauc_k, asmc_k
+
+   ! The daylight columns (1:nday) and the CAM layers in the radiation
+   ! calculation (1:pver-ktopcam+1, not the "extra layer")
+   real(kind_phys) :: cdf(nswgpts,nday,pver-ktopcam+1)    ! random numbers
+   real(kind_phys) :: cldfrac(nday,pver-ktopcam+1)        ! cloud fraction clipped to cldmin
+   real(kind_phys) :: tauc(nswbands,nday,pver-ktopcam+1)  ! cloud optical depth
+   real(kind_phys) :: ssac(nswbands,nday,pver-ktopcam+1)  ! single scattering albedo
+   real(kind_phys) :: asmc(nswbands,nday,pver-ktopcam+1)  ! asymmetry parameter
+   integer :: nver
    !--------------------------------------------------------------------------------
+
+   errmsg = ''
+   errflg = 0
 
    ! if no daylight columns the cloud_sw object isn't initialized
    if (nday > 0 .and. dosw) then
@@ -90,74 +88,77 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
       ! number of CAM's layers in radiation calculation.  Does not include the "extra layer".
       nver = pver - ktopcam + 1
 
-      allocate( &
-         cldf(nday,nver),                      &
-         day_cld_tau(nswbands,nday,nver),      &
-         day_cld_tau_w(nswbands,nday,nver),    &
-         day_cld_tau_w_g(nswbands,nday,nver),  &
-         tauc(nswbands,nday,nver), taucmcl(nswgpts,nday,nver), &
-         ssac(nswbands,nday,nver), ssacmcl(nswgpts,nday,nver), &
-         asmc(nswbands,nday,nver), asmcmcl(nswgpts,nday,nver), stat=istat, errmsg=alloc_errmsg)
-      if (istat /= 0) then
-         errflg = 1
-         write(errmsg,*) 'rrtmgp_sw_mcica_subcol_gen_run: failed to allocate variable(s) - message: ', alloc_errmsg
-         return
-      end if
+      ! Band of each g-point (the gas optics' convert_gpt2band)
+      gpt2band(:) = kdist_sw%gas_props%get_gpoint_bands()
 
       ! Subset data so just the daylight columns, and the number of CAM layers in the
-      ! radiation calculation are used by MCICA to produce subcolumns.
-      cldf            = cldfprime(       idxday(1:nday), ktopcam:)
-      day_cld_tau     = c_cld_tau(    :, idxday(1:nday), ktopcam:)
-      day_cld_tau_w   = c_cld_tau_w(  :, idxday(1:nday), ktopcam:)
-      day_cld_tau_w_g = c_cld_tau_w_g(:, idxday(1:nday), ktopcam:)
+      ! radiation calculation are used by MCICA to produce subcolumns, and compute
+      ! the optical properties needed for the 2-stream calculations.  These
+      ! calculations are the same as the RRTMG version.
+      do k = 1, nver
+         do i = 1, nday
+            icol = idxday(i)
+            ! clip cloud fraction
+            cldfrac(i,k) = cldfprime(icol,ktopcam+k-1)
+            if (cldfrac(i,k) < cldmin) then
+               cldfrac(i,k) = 0._kind_phys
+            end if
+            do n = 1, nswbands
+               tau_k     = c_cld_tau    (n,icol,ktopcam+k-1)
+               tau_w_k   = c_cld_tau_w  (n,icol,ktopcam+k-1)
+               tau_w_g_k = c_cld_tau_w_g(n,icol,ktopcam+k-1)
+               ! set cloud optical depth, clip @ zero
+               if (tau_k > 0.0_kind_phys) then
+                  tauc_k = tau_k
+               else
+                  tauc_k = 0.0_kind_phys
+               end if
+               ! set value of asymmetry
+               if (tau_w_k > 0.0_kind_phys) then
+                  asmc_k = tau_w_g_k / max(tau_w_k, tiny)
+               else
+                  asmc_k = 0.0_kind_phys
+               end if
+               ! set value of single scattering albedo; asymmetry to zero when tauc = 0
+               if (tauc_k > 0.0_kind_phys) then
+                  ssac(n,i,k) = max(tau_w_k, tiny) / max(tauc_k, tiny)
+               else
+                  ssac(n,i,k) = 1.0_kind_phys
+                  asmc_k = 0.0_kind_phys
+               end if
+               tauc(n,i,k) = tauc_k
+               asmc(n,i,k) = asmc_k
+            end do
+         end do
+      end do
 
-      ! Compute the optical properties needed for the 2-stream calculations.  These calculations
-      ! are the same as the RRTMG version.
-
-      ! set cloud optical depth, clip @ zero
-      tauc = merge(day_cld_tau, 0.0_kind_phys, day_cld_tau > 0.0_kind_phys)
-      ! set value of asymmetry
-      asmc = merge(day_cld_tau_w_g / max(day_cld_tau_w, tiny), 0.0_kind_phys, day_cld_tau_w > 0.0_kind_phys)
-      ! set value of single scattering albedo
-      ssac = merge(max(day_cld_tau_w, tiny) / max(tauc, tiny), 1.0_kind_phys , tauc > 0.0_kind_phys)
-      ! set asymmetry to zero when tauc = 0
-      asmc = merge(asmc, 0.0_kind_phys, tauc > 0.0_kind_phys)
-
-      ! clip cloud fraction
-      cldfrac(:,:) = cldf(:nday,:)
-      where (cldfrac(:,:) < cldmin)
-         cldfrac(:,:) = 0._kind_phys
-      end where
-
-      ! Create a seed that depends on the state of the columns.
-      ! Use pmid_day from bottom four layers.
+      ! Random numbers: one KISS stream per daylight column, seeded from the
+      ! state of the column (pmid_day of the bottom four layers), advanced by
+      ! changeseed values, then one number per subcolumn and level (level fastest).
       do i = 1, nday
-         kiss_seed(i,1) = (pmid_day(i,nlay)   - int(pmid_day(i,nlay)))    * 1000000000
-         kiss_seed(i,2) = (pmid_day(i,nlay-1) - int(pmid_day(i,nlay-1)))  * 1000000000
-         kiss_seed(i,3) = (pmid_day(i,nlay-2) - int(pmid_day(i,nlay-2)))  * 1000000000
-         kiss_seed(i,4) = (pmid_day(i,nlay-3) - int(pmid_day(i,nlay-3)))  * 1000000000
+         kiss_seed1 = (pmid_day(i,nlay)   - int(pmid_day(i,nlay)))    * 1000000000
+         kiss_seed2 = (pmid_day(i,nlay-1) - int(pmid_day(i,nlay-1)))  * 1000000000
+         kiss_seed3 = (pmid_day(i,nlay-2) - int(pmid_day(i,nlay-2)))  * 1000000000
+         kiss_seed4 = (pmid_day(i,nlay-3) - int(pmid_day(i,nlay-3)))  * 1000000000
+         s1 = kiss_rng_seed(kiss_seed1)
+         s2 = kiss_rng_seed(kiss_seed2)
+         s3 = kiss_rng_seed(kiss_seed3)
+         s4 = kiss_rng_seed(kiss_seed4)
+         do n = 1, changeseed
+            rand_num = kiss_rng_next(s1, s2, s3, s4)
+         end do
+         do isubcol = 1, nswgpts
+            do k = 1, nver
+               cdf(isubcol,i,k) = kiss_rng_next(s1, s2, s3, s4)
+            end do
+         end do
       end do
-
-      ! create the RNG object
-      kiss_gen = ShrKissRandGen(kiss_seed)
-
-      ! Advance randum number generator by changeseed values
-      do i = 1, changeSeed
-         call kiss_gen%random(rand_num_1d)
-      end do
-
-      ! Generate random numbers in each subcolumn at every level
-      do isubcol = 1,nswgpts
-         call kiss_gen%random(rand_num)
-         cdf(isubcol,:,:) = rand_num(:,:)
-      enddo
 
       ! Maximum-Random overlap
       ! i) pick a random number for top layer.
       ! ii) walk down the column:
       !    - if the layer above is cloudy, use the same random number as in the layer above
       !    - if the layer above is clear, use a new random number
-
       do k = 2, nver
          do i = 1, nday
             do isubcol = 1, nswgpts
@@ -170,46 +171,35 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
          end do
       end do
 
-      do k = 1, nver
-         iscloudy(:,:,k) = (cdf(:,:,k) >= 1._kind_phys - spread(cldfrac(:,k), dim=1, nCopies=nswgpts) )
-      end do
-
-      ! -- generate subcolumns for homogeneous clouds -----
-      ! where there is a cloud, set the subcolumn cloud properties;
-      ! incoming tauc should be in-cloud quantites and not grid-averaged quantities
-      do k = 1,nver
-         do i = 1,nday
-            do isubcol = 1,nswgpts
-               if (iscloudy(isubcol,i,k) .and. (cldfrac(i,k) > 0._kind_phys) ) then
-                  n = kdist_sw%gas_props%convert_gpt2band(isubcol)
-                  taucmcl(isubcol,i,k) = tauc(n,i,k)
-                  ssacmcl(isubcol,i,k) = ssac(n,i,k)
-                  asmcmcl(isubcol,i,k) = asmc(n,i,k)
-               else
-                  taucmcl(isubcol,i,k) = 0._kind_phys
-                  ssacmcl(isubcol,i,k) = 1._kind_phys
-                  asmcmcl(isubcol,i,k) = 0._kind_phys
-               end if
-            end do
-         end do
-      end do
-
-      call kiss_gen%finalize()
-
       ! If there is an extra layer in the radiation then this initialization
       ! will provide the optical properties there.
       cloud_sw%optical_props%tau = 0.0_kind_phys
       cloud_sw%optical_props%ssa = 1.0_kind_phys
       cloud_sw%optical_props%g   = 0.0_kind_phys
 
-      ! Set the properties on g-points.
-      do igpt = 1,nswgpts
-         cloud_sw%optical_props%g  (:,ktoprad:,igpt) = asmcmcl(igpt,:,:)
-         cloud_sw%optical_props%ssa(:,ktoprad:,igpt) = ssacmcl(igpt,:,:)
-         cloud_sw%optical_props%tau(:,ktoprad:,igpt) = taucmcl(igpt,:,:)
+      ! -- generate subcolumns for homogeneous clouds -----
+      ! where there is a cloud (the subcolumn is cloudy), set the subcolumn
+      ! cloud properties on the g-points; incoming tauc should be in-cloud
+      ! quantites and not grid-averaged quantities
+      do igpt = 1, nswgpts
+         do k = 1, nver
+            do i = 1, nday
+               if (cdf(igpt,i,k) >= 1._kind_phys - cldfrac(i,k) .and. &
+                   cldfrac(i,k) > 0._kind_phys) then
+                  n = gpt2band(igpt)
+                  cloud_sw%optical_props%g  (i,ktoprad+k-1,igpt) = asmc(n,i,k)
+                  cloud_sw%optical_props%ssa(i,ktoprad+k-1,igpt) = ssac(n,i,k)
+                  cloud_sw%optical_props%tau(i,ktoprad+k-1,igpt) = tauc(n,i,k)
+               else
+                  cloud_sw%optical_props%g  (i,ktoprad+k-1,igpt) = 0._kind_phys
+                  cloud_sw%optical_props%ssa(i,ktoprad+k-1,igpt) = 1._kind_phys
+                  cloud_sw%optical_props%tau(i,ktoprad+k-1,igpt) = 0._kind_phys
+               end if
+            end do
+         end do
       end do
 
-      ! validate checks that: tau > 0, ssa is in range [0,1], and g is in range [-1,1].
+      ! validate checks that: tau > 0, ssa is in range [0,1], and g is in range [-1,1]
       errmsg = cloud_sw%optical_props%validate()
       if (len_trim(errmsg) > 0) then
          errflg = 1
@@ -222,12 +212,6 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
          errflg = 1
          return
       end if
-
-      ! All information is in cloud_sw, now deallocate local vars.
-      deallocate( &
-         cldf, tauc, ssac, asmc, &
-         taucmcl, ssacmcl, asmcmcl,&
-         day_cld_tau, day_cld_tau_w, day_cld_tau_w_g )
 
    end if
 

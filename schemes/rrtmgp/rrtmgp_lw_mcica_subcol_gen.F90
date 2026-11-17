@@ -45,7 +45,8 @@ subroutine rrtmgp_lw_mcica_subcol_gen_run( &
    cldfprime, c_cld_lw_abs, changeseed, pmid, cloud_lw,     &
    errmsg, errflg )
    use ccpp_kinds,             only: kind_phys
-   use shr_RandNum_mod,        only: ShrKissRandGen
+   use iso_fortran_env,        only: int64
+   use atmos_phys_kiss_rng,    only: kiss_rng_seed, kiss_rng_next
    use ccpp_gas_optics_rrtmgp, only: ty_gas_optics_rrtmgp_ccpp
    use ccpp_optical_props,     only: ty_optical_props_1scl_ccpp
 
@@ -78,21 +79,19 @@ subroutine rrtmgp_lw_mcica_subcol_gen_run( &
 
    ! Local variables
 
-   integer :: idx, isubcol, kdx, ndx
+   integer :: idx, isubcol, kdx, ndx, bnd
 
    real(kind_phys), parameter :: cldmin = 1.0e-80_kind_phys  ! min cloud fraction
    real(kind_phys) :: cldf(ncol,nlay)      ! cloud fraction clipped to cldmin
 
-   type(ShrKissRandGen) :: kiss_gen  ! KISS RNG object
-   integer  :: kiss_seed(ncol,4)
-   real(kind_phys) :: rand_num_1d(ncol,1)   ! random number (kissvec)
-   real(kind_phys) :: rand_num(ncol,nlay)   ! random number (kissvec)
-
-   real(kind_phys) :: cdf(ngpt,ncol,nlay)   ! random numbers
-   logical  :: iscloudy(ngpt,ncol,nlay)   ! flag that says whether a gridbox is cloudy
+   integer :: gpt2band(ngpt)               ! band of each g-point
+   integer :: kiss_seed1, kiss_seed2, kiss_seed3, kiss_seed4
+   integer(int64) :: s1, s2, s3, s4        ! KISS state of a column
+   real(kind_phys) :: rand_num             ! random number (KISS)
+   real(kind_phys) :: cdf(ngpt,ncol,nlay)  ! random numbers
    real(kind_phys) :: tauc(nbnd,ncol,nlay)
-   real(kind_phys) :: taucmcl(ngpt,ncol,nlay)
-   !------------------------------------------------------------------------------------------ 
+   real(kind_phys) :: tau_k
+   !------------------------------------------------------------------------------------------
 
    ! Set error variables
    errflg = 0
@@ -103,90 +102,89 @@ subroutine rrtmgp_lw_mcica_subcol_gen_run( &
       return
    end if
 
+   ! Band of each g-point (the gas optics' convert_gpt2band)
+   gpt2band(:) = kdist%gas_props%get_gpoint_bands()
+
    ! Subset "chunk" data so just the number of CAM layers in the
-   ! radiation calculation are used by MCICA to produce subcolumns
-   cldf = cldfprime(:, ktopcam:)
+   ! radiation calculation are used by MCICA to produce subcolumns;
+   ! clip cloud fraction and enforce tauc >= 0.
+   do kdx = 1, nlay
+      do idx = 1, ncol
+         cldf(idx,kdx) = cldfprime(idx,ktopcam+kdx-1)
+         if (cldf(idx,kdx) < cldmin) then
+            cldf(idx,kdx) = 0._kind_phys
+         end if
+         do bnd = 1, nbnd
+            tau_k = c_cld_lw_abs(bnd,idx,ktopcam+kdx-1)
+            if (tau_k > 0.0_kind_phys) then
+               tauc(bnd,idx,kdx) = tau_k
+            else
+               tauc(bnd,idx,kdx) = 0.0_kind_phys
+            end if
+         end do
+      end do
+   end do
 
-   tauc = c_cld_lw_abs(:, :, ktopcam:)
-
-   ! Enforce tauc >= 0.
-   tauc = merge(tauc, 0.0_kind_phys, tauc > 0.0_kind_phys)
-
-   ! clip cloud fraction
-   where (cldf(:,:) < cldmin)
-      cldf(:,:) = 0._kind_phys
-   end where
-
-   ! Create a seed that depends on the state of the columns.
-   ! Use pmid from bottom four layers. 
+   ! Random numbers: one KISS stream per column, seeded from the state of
+   ! the column (pmid of the bottom four layers), advanced by changeseed
+   ! values, then one number per subcolumn and level (level fastest).
    do idx = 1, ncol
-      kiss_seed(idx,1) = (pmid(idx,pver)   - int(pmid(idx,pver)))    * 1000000000
-      kiss_seed(idx,2) = (pmid(idx,pver-1) - int(pmid(idx,pver-1)))  * 1000000000
-      kiss_seed(idx,3) = (pmid(idx,pver-2) - int(pmid(idx,pver-2)))  * 1000000000
-      kiss_seed(idx,4) = (pmid(idx,pver-3) - int(pmid(idx,pver-3)))  * 1000000000
+      kiss_seed1 = (pmid(idx,pver)   - int(pmid(idx,pver)))    * 1000000000
+      kiss_seed2 = (pmid(idx,pver-1) - int(pmid(idx,pver-1)))  * 1000000000
+      kiss_seed3 = (pmid(idx,pver-2) - int(pmid(idx,pver-2)))  * 1000000000
+      kiss_seed4 = (pmid(idx,pver-3) - int(pmid(idx,pver-3)))  * 1000000000
+      s1 = kiss_rng_seed(kiss_seed1)
+      s2 = kiss_rng_seed(kiss_seed2)
+      s3 = kiss_rng_seed(kiss_seed3)
+      s4 = kiss_rng_seed(kiss_seed4)
+      do ndx = 1, changeseed
+         rand_num = kiss_rng_next(s1, s2, s3, s4)
+      end do
+      do isubcol = 1, ngpt
+         do kdx = 1, nlay
+            cdf(isubcol,idx,kdx) = kiss_rng_next(s1, s2, s3, s4)
+         end do
+      end do
    end do
-
-   ! create the RNG object
-   kiss_gen = ShrKissRandGen(kiss_seed)
-
-   ! Advance randum number generator by changeseed values
-   do idx = 1, changeSeed
-      call kiss_gen%random(rand_num_1d)
-   end do
-
-   ! Generate random numbers in each subcolumn at every level
-   do isubcol = 1,ngpt
-      call kiss_gen%random(rand_num)
-      cdf(isubcol,:,:) = rand_num(:,:)
-   enddo
 
    ! Maximum-Random overlap
    ! i) pick a random number for top layer.
-   ! ii) walk down the column: 
+   ! ii) walk down the column:
    !    - if the layer above is cloudy, use the same random number as in the layer above
-   !    - if the layer above is clear, use a new random number 
+   !    - if the layer above is clear, use a new random number
 
    do kdx = 2, nlay
       do idx = 1, ncol
          do isubcol = 1, ngpt
             if (cdf(isubcol,idx,kdx-1) > 1._kind_phys - cldf(idx,kdx-1) ) then
-               cdf(isubcol,idx,kdx) = cdf(isubcol,idx,kdx-1) 
+               cdf(isubcol,idx,kdx) = cdf(isubcol,idx,kdx-1)
             else
                cdf(isubcol,idx,kdx) = cdf(isubcol,idx,kdx) * (1._kind_phys - cldf(idx,kdx-1))
             end if
          end do
       end do
    end do
- 
-   do kdx = 1, nlay
-      iscloudy(:,:,kdx) = (cdf(:,:,kdx) >= 1._kind_phys - spread(cldf(:,kdx), dim=1, nCopies=ngpt) )
-   end do
-
-   ! -- generate subcolumns for homogeneous clouds -----
-   ! where there is a cloud, set the subcolumn cloud properties;
-   ! incoming tauc should be in-cloud quantites and not grid-averaged quantities
-   do kdx = 1,nlay
-      do idx = 1,ncol
-         do isubcol = 1,ngpt
-            if (iscloudy(isubcol,idx,kdx) .and. (cldf(idx,kdx) > 0._kind_phys) ) then
-               ndx = kdist%gas_props%convert_gpt2band(isubcol)
-               taucmcl(isubcol,idx,kdx) = tauc(ndx,idx,kdx)
-            else
-               taucmcl(isubcol,idx,kdx) = 0._kind_phys
-            end if
-         end do
-      end do
-   end do
-
-   call kiss_gen%finalize()
 
    ! If there is an extra layer in the radiation then this initialization
    ! will provide zero optical depths there
    cloud_lw%optical_props%tau = 0.0_kind_phys
 
-   ! Set the properties on g-points
-   do idx = 1, ngpt
-      cloud_lw%optical_props%tau(:,ktoprad:,idx) = taucmcl(idx,:,:)
+   ! -- generate subcolumns for homogeneous clouds -----
+   ! where there is a cloud (the subcolumn is cloudy), set the subcolumn
+   ! cloud properties on the g-points; incoming tauc should be in-cloud
+   ! quantites and not grid-averaged quantities
+   do isubcol = 1, ngpt
+      do kdx = 1, nlay
+         do idx = 1, ncol
+            if (cdf(isubcol,idx,kdx) >= 1._kind_phys - cldf(idx,kdx) .and. &
+                cldf(idx,kdx) > 0._kind_phys) then
+               cloud_lw%optical_props%tau(idx,ktoprad+kdx-1,isubcol) = &
+                    tauc(gpt2band(isubcol),idx,kdx)
+            else
+               cloud_lw%optical_props%tau(idx,ktoprad+kdx-1,isubcol) = 0._kind_phys
+            end if
+         end do
+      end do
    end do
 
    ! validate checks that: tau > 0
