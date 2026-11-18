@@ -46,14 +46,23 @@ contains
     character(len=512), intent(out) :: errmsg    ! Error message
     integer,            intent(out) :: errflg    ! Error flag
 
+    integer :: i, k
+
     errmsg = ''
     errflg = 0
 
-    ! Initialize pressure coordinate object for vertical diffusion solver
+    ! Initialize pressure coordinate object for vertical diffusion solver.
+    ! On the host: coords1d is a host object (its consumers, the diffusion
+    ! solver and bretherton_park_diff, run on the host).
     p = coords1d(pint(:ncol,:pverp))
 
     ! Calculate potential temperature [K]
-    th(:ncol,:) = t(:ncol,:) * exner(:ncol,:)
+    !$acc parallel loop collapse(2) copyin(t, exner) copyout(th)
+    do k = 1, pver
+      do i = 1, ncol
+        th(i,k) = t(i,k) * exner(i,k)
+      end do
+    end do
 
   end subroutine vertical_diffusion_prepare_inputs_run
 
@@ -126,7 +135,8 @@ contains
 
     ! Local variables
     integer :: const_wv_idx                                    ! Water vapor constituent index
-    real(kind_phys) :: thvs(ncol)                              ! Virtual potential temperature at surface [K]
+    real(kind_phys) :: thvs                                    ! Virtual potential temperature at surface [K]
+    integer :: i
 
     ! Check constituents list and locate water vapor index
     ! (not assumed to be 1)
@@ -134,11 +144,16 @@ contains
          const_wv_idx, errflg, errmsg)
     if (errflg /= 0) return
 
-    thvs  (:ncol) = calc_virtual_temperature(th(:ncol,pver), q_wv(:ncol,pver), zvir)
-    khfs  (:ncol) = calc_kinematic_heat_flux(shf_from_coupler(:ncol), rrho(:ncol), cpair)
-    kqfs  (:ncol) = calc_kinematic_water_vapor_flux(cflx_from_coupler(:ncol,const_wv_idx), rrho(:ncol))
-    kbfs  (:ncol) = calc_kinematic_buoyancy_flux(khfs(:ncol), zvir, th(:ncol,pver), kqfs(:ncol))
-    obklen(:ncol) = calc_obukhov_length(thvs(:ncol), ustar(:ncol), gravit, karman, kbfs(:ncol))
+    !$acc parallel loop private(thvs) &
+    !$acc   copyin(th, q_wv, shf_from_coupler, cflx_from_coupler, rrho, ustar) &
+    !$acc   copyout(khfs, kqfs, kbfs, obklen)
+    do i = 1, ncol
+      thvs      = calc_virtual_temperature(th(i,pver), q_wv(i,pver), zvir)
+      khfs(i)   = calc_kinematic_heat_flux(shf_from_coupler(i), rrho(i), cpair)
+      kqfs(i)   = calc_kinematic_water_vapor_flux(cflx_from_coupler(i,const_wv_idx), rrho(i))
+      kbfs(i)   = calc_kinematic_buoyancy_flux(khfs(i), zvir, th(i,pver), kqfs(i))
+      obklen(i) = calc_obukhov_length(thvs, ustar(i), gravit, karman, kbfs(i))
+    end do
 
   end subroutine compute_kinematic_fluxes_and_obklen_run
 
@@ -176,23 +191,29 @@ contains
     character(len=512), intent(out) :: errmsg
     integer,            intent(out) :: errflg
 
+    integer :: i
+
     errmsg = ''
     errflg = 0
 
-    ! Initialize total surface stresses from coupler
-    ! These are used for HB diffusion scheme and later PBL diagnostics but
-    ! NOT for the vertical diffusion solver, which uses surface stresses from the coupler only,
-    ! or just zero (in the case of CLUBB)
-    tautotx(:ncol) = wsx_from_coupler(:ncol)
-    tautoty(:ncol) = wsy_from_coupler(:ncol)
+    !$acc parallel loop copyin(wsx_from_coupler, wsy_from_coupler, tautmsx, tautmsy, &
+    !$acc   taubljx, taubljy) copyout(tautotx, tautoty)
+    do i = 1, ncol
+      ! Initialize total surface stresses from coupler
+      ! These are used for HB diffusion scheme and later PBL diagnostics but
+      ! NOT for the vertical diffusion solver, which uses surface stresses from the coupler only,
+      ! or just zero (in the case of CLUBB)
+      tautotx(i) = wsx_from_coupler(i)
+      tautoty(i) = wsy_from_coupler(i)
 
-    ! Add turbulent mountain stress to total surface stress
-    tautotx(:ncol) = tautotx(:ncol) + tautmsx(:ncol)
-    tautoty(:ncol) = tautoty(:ncol) + tautmsy(:ncol)
+      ! Add turbulent mountain stress to total surface stress
+      tautotx(i) = tautotx(i) + tautmsx(i)
+      tautoty(i) = tautoty(i) + tautmsy(i)
 
-    ! Add Beljaars integrated drag to total surface stress
-    tautotx(:ncol) = tautotx(:ncol) + taubljx(:ncol)
-    tautoty(:ncol) = tautoty(:ncol) + taubljy(:ncol)
+      ! Add Beljaars integrated drag to total surface stress
+      tautotx(i) = tautotx(i) + taubljx(i)
+      tautoty(i) = tautoty(i) + taubljy(i)
+    end do
 
   end subroutine vertical_diffusion_set_total_surface_stress_run
 

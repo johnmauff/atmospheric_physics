@@ -67,11 +67,16 @@ contains
     character(len=512), intent(out) :: errmsg
     integer,            intent(out) :: errflg
 
+    integer :: i
+
     errmsg = ''
     errflg = 0
 
     ! Default
-    t_toai(:ncol) = t(:ncol, 1)  ! Use temperature at top model level [K]
+    !$acc parallel loop copyin(t) copyout(t_toai)
+    do i = 1, ncol
+      t_toai(i) = t(i, 1)  ! Use temperature at top model level [K]
+    end do
 
     ! Eventually, if ubc_fixed_temp is available, use ubc_t.
 
@@ -135,54 +140,68 @@ contains
     errmsg = ''
     errflg = 0
 
+    !$acc data copyin(rairv, t, t_toai, pint, pintdry) &
+    !$acc      copyout(ti, rairi, rhoi, rhoi_dry, dpidz_sq)
+
     ! Interpolate temperature to interfaces
-    ti(:ncol,1) = t_toai(:ncol)
+    !$acc parallel loop
+    do i = 1, ncol
+       ti(i,1) = t_toai(i)
+       ! Assume temperature at surface interface is the same as the midpoint value in the lowest layer:
+       ti(i,pverp) = t(i,pver)
+    end do
+    !$acc parallel loop collapse(2)
     do k = 2, pver
        do i = 1, ncol
           ti(i,k) = 0.5_kind_phys * (t(i,k) + t(i,k-1))
        end do
     end do
-    ! Assume temperature at surface interface is the same as the midpoint value in the lowest layer:
-    ti(:ncol,pverp) = t(:ncol,pver)
 
     ! Set gas constant at interfaces
     if(flag_for_constituent_dependent_gas_constant) then
-      rairi(:ncol,1) = rairv(:ncol,1)
+      !$acc parallel loop
+      do i = 1, ncol
+        rairi(i,1) = rairv(i,1)
+        ! Assume gas constant at surface interface is the same as the midpoint value in the lowest layer:
+        rairi(i,pverp) = rairv(i,pver)
+      end do
+      !$acc parallel loop collapse(2)
       do k = 2, pver
         do i = 1, ncol
           rairi(i,k) = 0.5_kind_phys * (rairv(i,k)+rairv(i,k-1))
         end do
       end do
-
-      ! Assume gas constant at surface interface is the same as the midpoint value in the lowest layer:
-      rairi(:ncol,pverp) = rairv(:ncol,pver)
     else
-      rairi(:ncol,:pverp) = rair
+      !$acc parallel loop collapse(2)
+      do k = 1, pverp
+        do i = 1, ncol
+          rairi(i,k) = rair
+        end do
+      end do
     endif
 
-    ! Compute rho at interfaces.
+    ! Compute rho and rho_dry at interfaces, and the square of the derivative of
+    ! pressure with height at interfaces.
+    ! Note that this equation assumes hydrostatic balance, i.e. the *derivative* dp/dz is g*rho
+    !$acc parallel loop collapse(2)
     do k = 1, pverp
        do i = 1, ncol
           rhoi(i,k)  = pint(i,k) / (rairi(i,k)*ti(i,k))
-       end do
-    end do
-
-    ! Compute rho_dry at interfaces.
-    do k = 1, pverp
-       do i = 1, ncol
           rhoi_dry(i,k)  = pintdry(i,k) / (rairi(i,k)*ti(i,k))
+          dpidz_sq(i,k) = gravit*rhoi(i,k)
+          dpidz_sq(i,k) = dpidz_sq(i,k)*dpidz_sq(i,k)
        end do
     end do
-
-    ! Compute square of derivative of pressure with height at interfaces.
-    ! Note that this equation assumes hydrostatic balance, i.e. the *derivative* dp/dz is g*rho
-    dpidz_sq = gravit*rhoi(:ncol, :)
-    dpidz_sq = dpidz_sq*dpidz_sq
 
     ! FIXME: The following two lines are kept in only to preserve answers;
     !        they really should be taken out completely.
-    dpidz_sq(:, 1) = gravit*(pint(:, 1)/(rairv(:ncol, 1)*t(:ncol, 1)))
-    dpidz_sq(:, 1) = dpidz_sq(:, 1)*dpidz_sq(:, 1)
+    !$acc parallel loop
+    do i = 1, ncol
+       dpidz_sq(i, 1) = gravit*(pint(i, 1)/(rairv(i, 1)*t(i, 1)))
+       dpidz_sq(i, 1) = dpidz_sq(i, 1)*dpidz_sq(i, 1)
+    end do
+
+    !$acc end data
 
   end subroutine vertical_diffusion_interpolate_to_interfaces_run
 
@@ -219,10 +238,10 @@ contains
 
     ! Local variables
     integer :: i
-    real(kind_phys) :: ws(ncol)                  ! Lowest-level wind speed [m s-1]
-    real(kind_phys) :: ksrfturb(ncol)            ! Surface drag coefficient of 'normal' stress. > 0.
+    real(kind_phys) :: ws                        ! Lowest-level wind speed [m s-1]
+    real(kind_phys) :: ksrfturb                  ! Surface drag coefficient of 'normal' stress. > 0.
                                                  ! Virtual mass input per unit time per unit area [kg m-2 s-1]
-    real(kind_phys) :: tau(ncol)                 ! Turbulent surface stress (not including mountain stress)
+    real(kind_phys) :: tau                       ! Turbulent surface stress (not including mountain stress)
 
     errmsg = ''
     errflg = 0
@@ -231,12 +250,13 @@ contains
     ! in the lowest model layer.
     if (do_iss) then
       ! Add surface drag coefficient for implicit diffusion
+      !$acc parallel loop private(ws, tau, ksrfturb) copyin(taux, tauy, u0, v0) copy(ksrf)
       do i = 1, ncol
-        ws(i) = max(sqrt(u0(i, pver)**2 + v0(i, pver)**2), wsmin)
-        tau(i) = sqrt(taux(i)**2 + tauy(i)**2)
-        ksrfturb(i) = max(tau(i)/ws(i), ksrfmin)
+        ws = max(sqrt(u0(i, pver)**2 + v0(i, pver)**2), wsmin)
+        tau = sqrt(taux(i)**2 + tauy(i)**2)
+        ksrfturb = max(tau/ws, ksrfmin)
+        ksrf(i) = ksrf(i) + ksrfturb  ! Do all surface stress implicitly
       end do
-      ksrf(:ncol) = ksrf(:ncol) + ksrfturb(:ncol)  ! Do all surface stress implicitly
     endif
 
   end subroutine implicit_surface_stress_add_drag_coefficient_run
@@ -267,11 +287,23 @@ contains
     character(len=512), intent(out)   :: errmsg  ! error message
     integer,            intent(out)   :: errflg  ! error flag
 
+    integer :: i, k
+    real(kind_phys) :: rdel_bot(ncol)  ! p%rdel at the bottom layer (p is a host object)
+
     errmsg = ''
     errflg = 0
 
+    rdel_bot(:) = p%rdel(:ncol, pver)
+
+    !$acc data copyin(ksrf, rdel_bot) copyout(tau_damp_rate)
+
     ! In most layers, no damping at all.
-    tau_damp_rate(:ncol,:pver) = 0._kind_phys
+    !$acc parallel loop collapse(2)
+    do k = 1, pver
+      do i = 1, ncol
+        tau_damp_rate(i,k) = 0._kind_phys
+      end do
+    end do
 
     ! Compute damp rate based on total surface drag coeff
     !
@@ -282,7 +314,12 @@ contains
     ! Therefore, gravit*ksrf/p%del is the acceleration of wind per unit
     ! wind speed, i.e. the rate at which wind is exponentially damped by
     ! surface stress.
-    tau_damp_rate(:ncol, pver) = -gravit*ksrf(:ncol)*p%rdel(:ncol, pver)
+    !$acc parallel loop
+    do i = 1, ncol
+      tau_damp_rate(i, pver) = -gravit*ksrf(i)*rdel_bot(i)
+    end do
+
+    !$acc end data
 
   end subroutine vertical_diffusion_wind_damping_rate_run
 
@@ -668,10 +705,15 @@ contains
     character(len=512), intent(out)   :: errmsg  ! error message
     integer,            intent(out)   :: errflg  ! error flag
 
+    integer :: i
+
     errmsg = ''
     errflg = 0
 
-    dse_top(:ncol) = 0._kind_phys
+    !$acc parallel loop copyout(dse_top)
+    do i = 1, ncol
+      dse_top(i) = 0._kind_phys
+    end do
 
   end subroutine vertical_diffusion_set_dry_static_energy_at_toa_zero_run
 
@@ -1034,8 +1076,8 @@ contains
     character(len=512), intent(out) :: errmsg     ! Error message
     integer,            intent(out) :: errflg     ! Error flag
 
-    integer :: m
-    logical :: const_is_dry
+    integer :: i, k, m
+    logical :: const_is_dry(pcnst)
 
     ! for bit-to-bitness with CAM.
     real(kind_phys) :: rdt
@@ -1047,19 +1089,45 @@ contains
     errmsg = ''
     errflg = 0
 
+    ! Which constituents are dry (on the host: const_props is a host object)
+    do m = 1, pcnst
+      call const_props(m)%is_dry(const_is_dry(m), errflg, errmsg)
+    enddo
+
+    !$acc data copyin(pdel, pdeldry, u0, v0, s0, q0, u1, v1, s1, q1, const_is_dry) &
+    !$acc      copyout(tend_s, tend_u, tend_v, tend_q)
+
     ! calculate physics tendencies
-    tend_s(:ncol,:)       = (s1(:ncol,:) - s0(:ncol,:)) * rdt
-    tend_u(:ncol,:)       = (u1(:ncol,:) - u0(:ncol,:)) * rdt
-    tend_v(:ncol,:)       = (v1(:ncol,:) - v0(:ncol,:)) * rdt
-    tend_q(:ncol,:pver,:) = (q1(:ncol,:pver,:) - q0(:ncol,:pver,:)) * rdt
+    !$acc parallel loop collapse(2)
+    do k = 1, pver
+      do i = 1, ncol
+        tend_s(i,k) = (s1(i,k) - s0(i,k)) * rdt
+        tend_u(i,k) = (u1(i,k) - u0(i,k)) * rdt
+        tend_v(i,k) = (v1(i,k) - v0(i,k)) * rdt
+      end do
+    end do
+    !$acc parallel loop collapse(3)
+    do m = 1, size(tend_q, 3)
+      do k = 1, pver
+        do i = 1, ncol
+          tend_q(i,k,m) = (q1(i,k,m) - q0(i,k,m)) * rdt
+        end do
+      end do
+    end do
 
     ! convert tendencies of dry constituents to dry basis
+    !$acc parallel loop collapse(3)
     do m = 1, pcnst
-      call const_props(m)%is_dry(const_is_dry, errflg, errmsg)
-      if(const_is_dry) then
-        tend_q(:ncol,:pver,m) = tend_q(:ncol,:pver,m) * pdel(:ncol,:pver) / pdeldry(:ncol,:pver)
-      endif
-    enddo
+      do k = 1, pver
+        do i = 1, ncol
+          if (const_is_dry(m)) then
+            tend_q(i,k,m) = tend_q(i,k,m) * pdel(i,k) / pdeldry(i,k)
+          end if
+        end do
+      end do
+    end do
+
+    !$acc end data
 
   end subroutine vertical_diffusion_tendencies_run
 
