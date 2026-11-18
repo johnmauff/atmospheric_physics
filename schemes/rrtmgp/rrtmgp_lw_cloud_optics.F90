@@ -26,6 +26,7 @@ contains
     use ccpp_gas_optics_rrtmgp,    only: ty_gas_optics_rrtmgp_ccpp
     use ccpp_optical_props,        only: ty_optical_props_1scl_ccpp
     use ccpp_kinds,                only: kind_phys
+    use mo_rte_util_array,         only: zero_array
     use rrtmgp_cloud_optics_setup, only: g_mu, g_lambda, nmu, nlambda, g_d_eff, n_g_d
     use rrtmgp_cloud_optics_setup, only: abs_lw_liq, abs_lw_ice
     use rrtmgp_cloud_optics_setup, only: liq_cld_optics, ice_cld_optics
@@ -215,8 +216,12 @@ contains
        errflg = 1
        return
     end if
-    ! Defined at return; rrtmgp_lw_mcica_subcol_gen fills it.
-    cloud_lw%optical_props%tau = 0._kind_phys
+    ! Keep tau on the device for the whole radiation call: created here,
+    ! deleted in rrtmgp_post (rrtmgp-rte-object-residency). Defined at
+    ! return; rrtmgp_lw_mcica_subcol_gen fills it.
+    !$acc enter data copyin(cloud_lw%optical_props)
+    !$acc enter data create(cloud_lw%optical_props%tau)
+    call zero_array(ncol, nlay, cloud_lw%optical_props%get_ngpt(), cloud_lw%optical_props%tau)
 
   end subroutine rrtmgp_lw_cloud_optics_run
 

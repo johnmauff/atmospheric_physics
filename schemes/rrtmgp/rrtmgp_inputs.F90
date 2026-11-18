@@ -24,6 +24,7 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
      use ccpp_gas_concentrations, only: ty_gas_concs_ccpp
      use ccpp_source_functions,   only: ty_source_func_lw_ccpp
      use atmos_phys_rad_utils,    only: is_visible
+     use mo_rte_util_array,       only: zero_array
 
      ! Inputs
      logical,                              intent(in) :: graupel_in_rad        ! Flag to include graupel in radiation calculation
@@ -87,7 +88,7 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
      real(kind_phys) :: tref_min
      real(kind_phys) :: tref_max
      real(kind_phys) :: pint_min1, pint_min2
-     integer :: idx, kdx, iband
+     integer :: idx, kdx, iband, ngpt
      integer :: band_kind(nswbands)  ! 1: visible, 2: near-infrared, 3: straddles both
      logical :: ltrick_rrtmgp, all_layers
 
@@ -344,10 +345,16 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
            errflg = 1
            return
         end if
-        ! Allocation leaves the values undefined; define them.
-        atm_optics_sw%optical_props%tau(:,:,:) = 0._kind_phys
-        atm_optics_sw%optical_props%ssa(:,:,:) = 0._kind_phys
-        atm_optics_sw%optical_props%g(:,:,:)   = 0._kind_phys
+        ! Keep the g-point arrays on the device for the whole radiation call:
+        ! created here, deleted in rrtmgp_post (rrtmgp-rte-object-residency)
+        !$acc enter data copyin(atm_optics_sw%optical_props)
+        !$acc enter data create(atm_optics_sw%optical_props%tau, atm_optics_sw%optical_props%ssa, &
+        !$acc                   atm_optics_sw%optical_props%g)
+        ! Allocation leaves the values undefined; define them (on the device)
+        ngpt = atm_optics_sw%optical_props%get_ngpt()
+        call zero_array(nday, nlay, ngpt, atm_optics_sw%optical_props%tau)
+        call zero_array(nday, nlay, ngpt, atm_optics_sw%optical_props%ssa)
+        call zero_array(nday, nlay, ngpt, atm_optics_sw%optical_props%g)
 
         ! Initialize object for SW aerosol optics.  Allocates arrays
         ! for properties represented by band.
@@ -356,9 +363,16 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
            errflg = 1
            return
         end if
-        aer_sw%optical_props%tau(:,:,:) = 0._kind_phys
-        aer_sw%optical_props%ssa(:,:,:) = 0._kind_phys
-        aer_sw%optical_props%g(:,:,:)   = 0._kind_phys
+        ! Keep the g-point arrays on the device for the whole radiation call:
+        ! created here, deleted in rrtmgp_post (rrtmgp-rte-object-residency)
+        !$acc enter data copyin(aer_sw%optical_props)
+        !$acc enter data create(aer_sw%optical_props%tau, aer_sw%optical_props%ssa, &
+        !$acc                   aer_sw%optical_props%g)
+        ! Allocation leaves the values undefined; define them (on the device)
+        ngpt = aer_sw%optical_props%get_ngpt()
+        call zero_array(nday, nlay, ngpt, aer_sw%optical_props%tau)
+        call zero_array(nday, nlay, ngpt, aer_sw%optical_props%ssa)
+        call zero_array(nday, nlay, ngpt, aer_sw%optical_props%g)
      end if
 
      if (dolw) then
@@ -375,8 +389,13 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
            errflg = 1
            return
         end if
-        ! Allocation leaves the values undefined; define them.
-        atm_optics_lw%optical_props%tau(:,:,:) = 0._kind_phys
+        ! Keep the g-point arrays on the device for the whole radiation call:
+        ! created here, deleted in rrtmgp_post (rrtmgp-rte-object-residency)
+        !$acc enter data copyin(atm_optics_lw%optical_props)
+        !$acc enter data create(atm_optics_lw%optical_props%tau)
+        ! Allocation leaves the values undefined; define them (on the device)
+        ngpt = atm_optics_lw%optical_props%get_ngpt()
+        call zero_array(ncol, nlay, ngpt, atm_optics_lw%optical_props%tau)
 
         ! Initialize object for LW aerosol optics.
         errmsg = aer_lw%optical_props%alloc_1scl(ncol, nlay, kdist_lw%gas_props%get_band_lims_wavenumber())
@@ -384,7 +403,13 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
            errflg = 1
            return
         end if
-        aer_lw%optical_props%tau(:,:,:) = 0._kind_phys
+        ! Keep the g-point arrays on the device for the whole radiation call:
+        ! created here, deleted in rrtmgp_post (rrtmgp-rte-object-residency)
+        !$acc enter data copyin(aer_lw%optical_props)
+        !$acc enter data create(aer_lw%optical_props%tau)
+        ! Allocation leaves the values undefined; define them (on the device)
+        ngpt = aer_lw%optical_props%get_ngpt()
+        call zero_array(ncol, nlay, ngpt, aer_lw%optical_props%tau)
 
         ! Initialize object for Planck sources.
         errmsg = sources_lw%sources%alloc(ncol, nlay, kdist_lw%gas_props)
@@ -392,10 +417,17 @@ subroutine rrtmgp_inputs_run(dosw, dolw, do_snow, do_graupel, trick_rrtmgp,    &
            errflg = 1
            return
         end if
-        sources_lw%sources%lay_source(:,:,:)   = 0._kind_phys
-        sources_lw%sources%lev_source(:,:,:)   = 0._kind_phys
-        sources_lw%sources%sfc_source(:,:)     = 0._kind_phys
-        sources_lw%sources%sfc_source_Jac(:,:) = 0._kind_phys
+        ! Keep the source arrays on the device for the whole radiation call:
+        ! created here, deleted in rrtmgp_post (rrtmgp-rte-object-residency)
+        !$acc enter data copyin(sources_lw%sources)
+        !$acc enter data create(sources_lw%sources%lay_source, sources_lw%sources%lev_source, &
+        !$acc                   sources_lw%sources%sfc_source, sources_lw%sources%sfc_source_Jac)
+        ! Allocation leaves the values undefined; define them (on the device)
+        ngpt = sources_lw%sources%get_ngpt()
+        call zero_array(ncol, nlay,   ngpt, sources_lw%sources%lay_source)
+        call zero_array(ncol, nlay+1, ngpt, sources_lw%sources%lev_source)
+        call zero_array(ncol, ngpt, sources_lw%sources%sfc_source)
+        call zero_array(ncol, ngpt, sources_lw%sources%sfc_source_Jac)
      end if
 
   end subroutine rrtmgp_inputs_run

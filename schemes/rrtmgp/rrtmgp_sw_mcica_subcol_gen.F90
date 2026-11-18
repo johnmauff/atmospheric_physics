@@ -84,6 +84,12 @@ subroutine rrtmgp_sw_mcica_subcol_gen_run(dosw, kdist_sw, nswbands, nswgpts, nda
          errflg = 1
          return
       end if
+      ! Keep the g-point arrays on the device for the whole radiation call:
+      ! created here, deleted in rrtmgp_post (rrtmgp-rte-object-residency).
+      ! Every element is set by the kernels below.
+      !$acc enter data copyin(cloud_sw%optical_props)
+      !$acc enter data create(cloud_sw%optical_props%tau, cloud_sw%optical_props%ssa, &
+      !$acc                   cloud_sw%optical_props%g)
 
       ! number of CAM's layers in radiation calculation.  Does not include the "extra layer".
       nver = pver - ktopcam + 1

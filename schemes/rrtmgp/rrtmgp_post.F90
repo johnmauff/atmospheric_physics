@@ -92,7 +92,7 @@ subroutine rrtmgp_post_run(nlay, dolw, qrs_prime, qrl_prime, fsns, pdel, atm_opt
    ! run RRTMGP's finalizer, leaving their OpenACC device copies behind.
    call gas_concs_sw%reset()
 
-   call sources_lw%sources%finalize()
+   call free_sources_lw(sources_lw)
    call free_optics_lw(atm_optics_lw, errmsg, errflg)
    if (errflg /= 0) then
       return
@@ -123,6 +123,15 @@ subroutine free_optics_sw(optics, errmsg, errflg)
    errmsg = ''
    errflg = 0
 
+   ! Delete the device copies first (created where the object is allocated;
+   ! rrtmgp-rte-object-residency), so no device mapping outlives the host
+   ! memory deallocated below
+   if (allocated(optics%optical_props%tau)) then
+      !$acc exit data delete(optics%optical_props%tau, optics%optical_props%ssa, &
+      !$acc                  optics%optical_props%g)
+      !$acc exit data delete(optics%optical_props)
+   end if
+
    errmsg = optics%optical_props%finalize_2str()
    if (len_trim(errmsg) /= 0) then
       errflg = 1
@@ -142,6 +151,14 @@ subroutine free_optics_lw(optics, errmsg, errflg)
    character(len=*),                 intent(out)   :: errmsg
    integer,                          intent(out)   :: errflg
 
+   ! Delete the device copies first (created where the object is allocated;
+   ! rrtmgp-rte-object-residency), so no device mapping outlives the host
+   ! memory deallocated below
+   if (allocated(optics%optical_props%tau)) then
+      !$acc exit data delete(optics%optical_props%tau)
+      !$acc exit data delete(optics%optical_props)
+   end if
+
    errmsg = optics%optical_props%finalize_1scl()
    if (len_trim(errmsg) /= 0) then
       errflg = 1
@@ -151,6 +168,26 @@ subroutine free_optics_lw(optics, errmsg, errflg)
    call optics%optical_props%finalize()
 
 end subroutine free_optics_lw
+
+!=========================================================================================
+
+subroutine free_sources_lw(sources)
+   use ccpp_source_functions,   only: ty_source_func_lw_ccpp
+
+   type(ty_source_func_lw_ccpp), intent(inout) :: sources
+
+   ! Delete the device copies first (created in rrtmgp_inputs;
+   ! rrtmgp-rte-object-residency), so no device mapping outlives the host
+   ! memory deallocated below
+   if (allocated(sources%sources%lay_source)) then
+      !$acc exit data delete(sources%sources%lay_source, sources%sources%lev_source, &
+      !$acc                  sources%sources%sfc_source, sources%sources%sfc_source_Jac)
+      !$acc exit data delete(sources%sources)
+   end if
+
+   call sources%sources%finalize()
+
+end subroutine free_sources_lw
 
 !=========================================================================================
 
