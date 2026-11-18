@@ -71,7 +71,9 @@ def vertical_diffusion(*, boundary_layer, mountain_stress=None, form_drag_dampin
         tms_beljaars_zero_stub()
 
     # Inputs
-    vertical_diffusion_prepare_inputs()         # pressure coordinates, potential temperature
+    vertical_diffusion_prepare_inputs()         # potential temperature
+    if boundary_layer.inputs is not None:
+        boundary_layer.inputs()                 # e.g. the p coords1d bretherton_park_diff reads
     hb_diff_prepare_vertical_diffusion_inputs() # surface fluxes from the coupler
     vertical_diffusion_not_use_rairv()          # not WACCM-X
     vertical_diffusion_set_temperature_at_toa_default()

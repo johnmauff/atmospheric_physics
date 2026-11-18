@@ -3,8 +3,10 @@
 ! PBL schemes.
 !
 ! These include:
-!   - the p vertical coordinate (coords1d), including destroying this object at end of timestep.
 !   - potential temperature (th)
+!   - the p vertical coordinate (coords1d), including destroying this object at
+!     end of timestep, in its own scheme (vertical_diffusion_pressure_coordinates),
+!     listed only in suites whose schemes read p (e.g. bretherton_park_diff).
 module vertical_diffusion_interstitials
   use ccpp_kinds, only: kind_phys
 
@@ -13,7 +15,9 @@ module vertical_diffusion_interstitials
 
   ! CCPP-compliant public interfaces
   public :: vertical_diffusion_prepare_inputs_run
-  public :: vertical_diffusion_prepare_inputs_timestep_final
+
+  public :: vertical_diffusion_pressure_coordinates_run
+  public :: vertical_diffusion_pressure_coordinates_timestep_final
 
   public :: compute_kinematic_fluxes_and_obklen_run
 
@@ -21,27 +25,19 @@ module vertical_diffusion_interstitials
 
 contains
 
-  ! Interstitial to prepare moist vertical coordinate for solver,
-  ! and compute potential temperature.
+  ! Interstitial to compute potential temperature.
 !> \section arg_table_vertical_diffusion_prepare_inputs_run Argument Table
 !! \htmlinclude vertical_diffusion_prepare_inputs_run.html
   subroutine vertical_diffusion_prepare_inputs_run( &
-    ncol, pver, pverp, &
-    pint, &
+    ncol, pver, &
     t, exner, &
-    p, &
     th, &
     errmsg, errflg)
 
-    use coords_1d,  only: coords1d
-
     integer,            intent(in)  :: ncol
     integer,            intent(in)  :: pver
-    integer,            intent(in)  :: pverp
-    real(kind_phys),    intent(in)  :: pint(:,:) ! Air pressure at interfaces [Pa]
     real(kind_phys),    intent(in)  :: t(:,:)    ! temperature [K]
     real(kind_phys),    intent(in)  :: exner(:,:)! exner [1]
-    type(coords1d),     intent(out) :: p         ! Vertical moist pressure coordinates for vertical diffusion [Pa]
     real(kind_phys),    intent(out) :: th(:,:)   ! Potential temperature [K]
     character(len=512), intent(out) :: errmsg    ! Error message
     integer,            intent(out) :: errflg    ! Error flag
@@ -50,11 +46,6 @@ contains
 
     errmsg = ''
     errflg = 0
-
-    ! Initialize pressure coordinate object for vertical diffusion solver.
-    ! On the host: coords1d is a host object (its consumers, the diffusion
-    ! solver and bretherton_park_diff, run on the host).
-    p = coords1d(pint(:ncol,:pverp))
 
     ! Calculate potential temperature [K]
     !$acc parallel loop collapse(2) copyin(t, exner) copyout(th)
@@ -66,10 +57,37 @@ contains
 
   end subroutine vertical_diffusion_prepare_inputs_run
 
-  ! Interstitial to clean up vertical coordinate after use.
-!> \section arg_table_vertical_diffusion_prepare_inputs_timestep_final Argument Table
-!! \htmlinclude vertical_diffusion_prepare_inputs_timestep_final.html
-  subroutine vertical_diffusion_prepare_inputs_timestep_final(p, errmsg, errflg)
+  ! Pressure coordinates (coords1d) of the vertical diffusion solver, for schemes
+  ! that use the object (e.g. bretherton_park_diff). The vertical diffusion
+  ! schemes themselves compute the coordinates from pint; this host object is
+  ! built only in suites that list this scheme.
+!> \section arg_table_vertical_diffusion_pressure_coordinates_run Argument Table
+!! \htmlinclude vertical_diffusion_pressure_coordinates_run.html
+  subroutine vertical_diffusion_pressure_coordinates_run( &
+    ncol, pverp, &
+    pint, &
+    p, &
+    errmsg, errflg)
+
+    use coords_1d,  only: coords1d
+
+    integer,            intent(in)  :: ncol
+    integer,            intent(in)  :: pverp
+    real(kind_phys),    intent(in)  :: pint(:,:) ! Air pressure at interfaces [Pa]
+    type(coords1d),     intent(out) :: p         ! Vertical moist pressure coordinates for vertical diffusion [Pa]
+    character(len=512), intent(out) :: errmsg    ! Error message
+    integer,            intent(out) :: errflg    ! Error flag
+
+    errmsg = ''
+    errflg = 0
+
+    p = coords1d(pint(:ncol,:pverp))
+
+  end subroutine vertical_diffusion_pressure_coordinates_run
+
+!> \section arg_table_vertical_diffusion_pressure_coordinates_timestep_final Argument Table
+!! \htmlinclude vertical_diffusion_pressure_coordinates_timestep_final.html
+  subroutine vertical_diffusion_pressure_coordinates_timestep_final(p, errmsg, errflg)
     use coords_1d,  only: coords1d
 
     type(coords1d),     intent(inout) :: p       ! Vertical moist pressure coordinates for vertical diffusion [Pa]
@@ -80,7 +98,7 @@ contains
     errflg = 0
 
     call p%finalize()
-  end subroutine vertical_diffusion_prepare_inputs_timestep_final
+  end subroutine vertical_diffusion_pressure_coordinates_timestep_final
 
   ! Compute kinematic fluxes (heat, water vapor, buoyancy), and obukhov length
 !> \section arg_table_compute_kinematic_fluxes_and_obklen_run Argument Table

@@ -267,8 +267,10 @@
     <!-- init phase only: for setting vertical diffusion top -->
     <scheme>hb_diff_set_vertical_diffusion_top</scheme>
 
-    <!-- vdiff pre-interstitial 0: create p coords1d and potential temp. -->
+    <!-- vdiff pre-interstitial 0: potential temperature, and the p coords1d
+         read by bretherton_park_diff. -->
     <scheme>vertical_diffusion_prepare_inputs</scheme>
+    <scheme>vertical_diffusion_pressure_coordinates</scheme>
 
     <!-- vdiff pre-interstitial 1: copy surface fluxes from coupler (cam_in)
          wsx and wsy from coupler are needed for implicit surface stress

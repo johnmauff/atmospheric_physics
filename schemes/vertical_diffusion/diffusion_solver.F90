@@ -268,18 +268,16 @@ contains
   pure subroutine vertical_diffusion_wind_damping_rate_run( &
     ncol, pver, &
     gravit, &
-    p, &
+    pint, &
     ksrf, &
     tau_damp_rate, &
     errmsg, errflg)
-
-    use coords_1d, only: Coords1D
 
     ! Input arguments
     integer,            intent(in)    :: ncol
     integer,            intent(in)    :: pver
     real(kind_phys),    intent(in)    :: gravit
-    type(coords1d),     intent(in)    :: p                  ! Pressure coordinates [Pa]
+    real(kind_phys),    intent(in)    :: pint(:,:)          ! Air pressure at interfaces [Pa]
     real(kind_phys),    intent(in)    :: ksrf(:)            ! total surface drag coefficient [kg m-2 s-1]
 
     ! Output arguments
@@ -288,14 +286,12 @@ contains
     integer,            intent(out)   :: errflg  ! error flag
 
     integer :: i, k
-    real(kind_phys) :: rdel_bot(ncol)  ! p%rdel at the bottom layer (p is a host object)
+    real(kind_phys) :: rdel_bot  ! 1/(pressure thickness) of the bottom layer, as Coords1D's rdel
 
     errmsg = ''
     errflg = 0
 
-    rdel_bot(:) = p%rdel(:ncol, pver)
-
-    !$acc data copyin(ksrf, rdel_bot) copyout(tau_damp_rate)
+    !$acc data copyin(ksrf, pint) copyout(tau_damp_rate)
 
     ! In most layers, no damping at all.
     !$acc parallel loop collapse(2)
@@ -314,9 +310,10 @@ contains
     ! Therefore, gravit*ksrf/p%del is the acceleration of wind per unit
     ! wind speed, i.e. the rate at which wind is exponentially damped by
     ! surface stress.
-    !$acc parallel loop
+    !$acc parallel loop private(rdel_bot)
     do i = 1, ncol
-      tau_damp_rate(i, pver) = -gravit*ksrf(i)*rdel_bot(i)
+      rdel_bot = 1._kind_phys/(pint(i,pver+1) - pint(i,pver))
+      tau_damp_rate(i, pver) = -gravit*ksrf(i)*rdel_bot
     end do
 
     !$acc end data
@@ -368,7 +365,7 @@ contains
              am_correction, &
              itaures, &
              do_beljaars, &
-             p, t, rhoi, &
+             pint, t, rhoi, &
              taux, tauy, &
              tau_damp_rate, &
              ksrftms, &
@@ -382,8 +379,8 @@ contains
              u1, v1, dse1, &
              errmsg, errflg)
 
-    use coords_1d, only: Coords1D
-    use vertical_diffusion_solver, only: fin_vol_solve
+    use atmos_phys_fin_vol_solver, only: fin_vol_coords_column, fin_vol_decomp_column, &
+                                         fin_vol_left_div_column
 
     ! Input Arguments
     integer,         intent(in)       :: ncol
@@ -396,7 +393,7 @@ contains
     logical,         intent(in)       :: am_correction    ! Do angular momentum conservation correction
     logical,         intent(in)       :: itaures          ! Flag for updating tauresx tauresy in this subroutine.
     logical,         intent(in)       :: do_beljaars      ! Flag indicating Beljaars drag
-    type(coords1d),  intent(in)       :: p                ! Pressure coordinates [Pa]
+    real(kind_phys), intent(in)       :: pint(:, :)       ! Air pressure at interfaces [Pa]
     real(kind_phys), intent(in)       :: t(:, :)          ! Temperature [K]
     real(kind_phys), intent(in)       :: rhoi(:, :)       ! Density of air at interfaces [kg m-3]
     real(kind_phys), intent(in)       :: taux(:)          ! Surface zonal stress [N m-2]
@@ -465,112 +462,131 @@ contains
     real(kind_phys) :: taubljx(ncol)             ! recomputed explicit/residual beljaars stress
     real(kind_phys) :: taubljy(ncol)             ! recomputed explicit/residual beljaars stress
 
+    ! Pressure coordinates (as Coords1D(pint)) and the tridiagonal decomposition
+    real(kind_phys) :: mid(ncol, pver), del(ncol, pver), rdel(ncol, pver)
+    real(kind_phys) :: rdst(ncol, pver-1)
+    real(kind_phys) :: ca(ncol, pver), ze(ncol, pver), dnom(ncol, pver)
+
     errmsg = ''
     errflg = 0
 
-    ! Set initial iterative outputs to input values
-    u1(:ncol,:pver) = u0(:ncol,:pver)
-    v1(:ncol,:pver) = v0(:ncol,:pver)
-    dse1(:ncol,:pver) = dse0(:ncol,:pver)
+    if (am_correction) then
+      ! preserve time-mean torque
+      ramda = 1._kind_phys
+    else
+      ramda = dt/timeres
+    end if
 
-    ! necessary temporaries used in computation
-    flux_to_state_conversion_factor(:ncol) = dt*gravit*p%rdel(:, pver)
+    ! OpenACC: one column per thread, levels in order (each column's operations
+    ! are those of the former whole-array code, in the same order). t is not used
+    ! here; it is in the clause so that it is not taken for host data.
+    !$acc data copyin(pint, t, rhoi, taux, tauy, tau_damp_rate, ksrftms, dragblj, kvm, &
+    !$acc             dpidz_sq, u0, v0, dse0) &
+    !$acc      copy(tauresx, tauresy) &
+    !$acc      copyout(dtk, tautmsx, tautmsy, u1, v1, dse1) &
+    !$acc      create(flux_to_state_conversion_factor, tmpi1, tmpi2, keg_in, keg_out, &
+    !$acc             tautotx, tautoty, dinp_u, dinp_v, usum_in, vsum_in, usum_out, &
+    !$acc             vsum_out, tauimpx, tauimpy, taubljx, taubljy, &
+    !$acc             mid, del, rdel, rdst, ca, ze, dnom)
 
-    ! second term here uses dpidz_sq(:,1) as defined because
-    ! the actual dpidz_sq term is "kept in only to preserve answers"
-    ! but it is actually not used here ...
-    tmpi2(:ncol, 1) = dt*(gravit*rhoi(:ncol,1)*gravit*rhoi(:ncol,1))/(p%mid(:, 1) - p%ifc(:, 1))
-    tmpi2(:ncol, 2:pver) = dt*dpidz_sq(:, 2:pver)*p%rdst
-
-    !---------------------------- !
-    ! Diffuse Horizontal Momentum !
-    !---------------------------- !
-    ! Compute the vertical upward differences of the input u,v for KE dissipation
-    ! at each interface.
-    ! Velocity = 0 at surface, so difference at the bottom interface is -u,v(pver)
-    ! These 'dinp_u, dinp_v' are computed using the non-diffused input wind.
-
+    !$acc parallel loop gang vector private(k, dout_u, dout_v)
     do i = 1, ncol
+      call fin_vol_coords_column(i, pver, pint, mid, del, rdel, rdst)
+
+      ! Set initial iterative outputs to input values
+      !$acc loop seq
+      do k = 1, pver
+        u1(i,k) = u0(i,k)
+        v1(i,k) = v0(i,k)
+        dse1(i,k) = dse0(i,k)
+      end do
+
+      ! necessary temporaries used in computation
+      flux_to_state_conversion_factor(i) = dt*gravit*rdel(i, pver)
+
+      ! second term here uses dpidz_sq(:,1) as defined because
+      ! the actual dpidz_sq term is "kept in only to preserve answers"
+      ! but it is actually not used here ...
+      tmpi2(i, 1) = dt*(gravit*rhoi(i,1)*gravit*rhoi(i,1))/(mid(i, 1) - pint(i, 1))
+      !$acc loop seq
+      do k = 2, pver
+        tmpi2(i, k) = dt*dpidz_sq(i, k)*rdst(i, k-1)
+      end do
+
+      !---------------------------- !
+      ! Diffuse Horizontal Momentum !
+      !---------------------------- !
+      ! Compute the vertical upward differences of the input u,v for KE dissipation
+      ! at each interface.
+      ! Velocity = 0 at surface, so difference at the bottom interface is -u,v(pver)
+      ! These 'dinp_u, dinp_v' are computed using the non-diffused input wind.
       dinp_u(i, 1) = 0._kind_phys
       dinp_v(i, 1) = 0._kind_phys
       dinp_u(i, pver + 1) = -u0(i, pver)
       dinp_v(i, pver + 1) = -v0(i, pver)
-    end do
-    do k = 2, pver
-      do i = 1, ncol
+      !$acc loop seq
+      do k = 2, pver
         dinp_u(i, k) = u0(i, k) - u0(i, k - 1)
         dinp_v(i, k) = v0(i, k) - v0(i, k - 1)
       end do
-    end do
 
-    ! -------------------------------------------------------------- !
-    ! Do 'Implicit Surface Stress' treatment for numerical stability !
-    ! in the lowest model layer.                                     !
-    ! -------------------------------------------------------------- !
-    if (do_iss) then
-      ! Vertical integration of input momentum.
-      ! This is total horizontal momentum per unit area [ kg*m/s/m2 ] in each column.
-      ! Note (u,v) are the raw input to the PBL scheme, not the
-      ! provisionally-marched ones within the iteration loop of the PBL scheme.
-
-      do i = 1, ncol
+      ! -------------------------------------------------------------- !
+      ! Do 'Implicit Surface Stress' treatment for numerical stability !
+      ! in the lowest model layer.                                     !
+      ! -------------------------------------------------------------- !
+      if (do_iss) then
+        ! Vertical integration of input momentum.
+        ! This is total horizontal momentum per unit area [ kg*m/s/m2 ] in each column.
+        ! Note (u,v) are the raw input to the PBL scheme, not the
+        ! provisionally-marched ones within the iteration loop of the PBL scheme.
         usum_in(i) = 0._kind_phys
         vsum_in(i) = 0._kind_phys
+        !$acc loop seq
         do k = 1, pver
-          usum_in(i) = usum_in(i) + (1._kind_phys/gravit)*u0(i, k)*p%del(i, k)
-          vsum_in(i) = vsum_in(i) + (1._kind_phys/gravit)*v0(i, k)*p%del(i, k)
+          usum_in(i) = usum_in(i) + (1._kind_phys/gravit)*u0(i, k)*del(i, k)
+          vsum_in(i) = vsum_in(i) + (1._kind_phys/gravit)*v0(i, k)*del(i, k)
         end do
-      end do
 
-      ! Add residual stress of previous time step explicitly into the lowest
-      ! model layer with a relaxation time scale of 'timeres'.
+        ! Add residual stress of previous time step explicitly into the lowest
+        ! model layer with a relaxation time scale of 'timeres' (ramda).
+        u1(i, pver) = u1(i, pver) + flux_to_state_conversion_factor(i)*tauresx(i)*ramda
+        v1(i, pver) = v1(i, pver) + flux_to_state_conversion_factor(i)*tauresy(i)*ramda
 
-      if (am_correction) then
-        ! preserve time-mean torque
-        ramda = 1._kind_phys
-      else
-        ramda = dt/timeres
-      end if
+      else ! .not. do_iss
+        ! In this case, do 'turbulent mountain stress' implicitly,
+        ! but do 'normal turbulent stress' explicitly.
+        ! In this case, there is no 'residual stress' as long as 'tms' is
+        ! treated in a fully implicit way, which is true.
 
-      u1(:ncol, pver) = u1(:ncol, pver) + flux_to_state_conversion_factor(:ncol)*tauresx(:ncol)*ramda
-      v1(:ncol, pver) = v1(:ncol, pver) + flux_to_state_conversion_factor(:ncol)*tauresy(:ncol)*ramda
+        ! Do 'normal stress' explicitly
+        u1(i, pver) = u1(i, pver) + flux_to_state_conversion_factor(i)*taux(i)
+        v1(i, pver) = v1(i, pver) + flux_to_state_conversion_factor(i)*tauy(i)
+      end if  ! End of 'do iss' (implicit surface stress)
 
-    else ! .not. do_iss
-      ! In this case, do 'turbulent mountain stress' implicitly,
-      ! but do 'normal turbulent stress' explicitly.
-      ! In this case, there is no 'residual stress' as long as 'tms' is
-      ! treated in a fully implicit way, which is true.
+      ! ------------------------------------------------------------------------------------- !
+      ! Diffuse horizontal momentum implicitly using tri-diagnonal matrix.                    !
+      ! The 'u,v' are input-output: the output 'u,v' are implicitly diffused winds.           !
+      !    For implicit 'normal' stress : ksrf = ksrftms + ksrfturb,                          !
+      !                                   u(pver) : explicitly include 'residual normal' stress !
+      !    For explicit 'normal' stress : ksrf = ksrftms                                      !
+      !                                   u(pver) : explicitly include 'normal' stress        !
+      ! Note that in all the two cases above, 'tms' is fully implicitly treated.              !
+      ! ------------------------------------------------------------------------------------- !
 
-      ! Do 'normal stress' explicitly
-      u1(:ncol, pver) = u1(:ncol, pver) + flux_to_state_conversion_factor(:ncol)*taux(:ncol)
-      v1(:ncol, pver) = v1(:ncol, pver) + flux_to_state_conversion_factor(:ncol)*tauy(:ncol)
-    end if  ! End of 'do iss' (implicit surface stress)
+      ! (fin_vol_solve for v1 and then u1 with coef_q=tau_damp_rate and
+      ! coef_q_diff=kvm*dpidz_sq; both use the same operator, so it is
+      ! decomposed once.)
+      call fin_vol_decomp_column(i, pver, dt, del, rdel, rdst, kvm, dpidz_sq, &
+                                 ca, ze, dnom, coef_q=tau_damp_rate)
+      call fin_vol_left_div_column(i, pver, ca, ze, dnom, v1)
+      call fin_vol_left_div_column(i, pver, ca, ze, dnom, u1)
 
-    ! --------------------------------------------------------------------------------------- !
-    ! Diffuse horizontal momentum implicitly using tri-diagnonal matrix.                      !
-    ! The 'u,v' are input-output: the output 'u,v' are implicitly diffused winds.             !
-    !    For implicit 'normal' stress : ksrf = ksrftms + ksrfturb,                            !
-    !                                   u(pver) : explicitly include 'residual normal' stress !
-    !    For explicit 'normal' stress : ksrf = ksrftms                                        !
-    !                                   u(pver) : explicitly include 'normal' stress          !
-    ! Note that in all the two cases above, 'tms' is fully implicitly treated.                !
-    ! --------------------------------------------------------------------------------------- !
+      ! ---------------------------------------------------------------------- !
+      ! Calculate 'total' ( tautotx ) and 'tms' ( tautmsx ) stresses that      !
+      ! have been actually added into the atmosphere at the current time step. !
+      ! Also, update residual stress, if required.                             !
+      ! ---------------------------------------------------------------------- !
 
-    v1(:ncol, :) = fin_vol_solve(dt, p, v1(:ncol, :), ncol, pver, &
-                                 coef_q=tau_damp_rate(:ncol,:pver), &
-                                 coef_q_diff=kvm(:ncol, :)*dpidz_sq(:ncol, :))
-
-    u1(:ncol, :) = fin_vol_solve(dt, p, u1(:ncol, :), ncol, pver, &
-                                 coef_q=tau_damp_rate(:ncol,:pver), &
-                                 coef_q_diff=kvm(:ncol, :)*dpidz_sq(:ncol, :))
-
-    ! ---------------------------------------------------------------------- !
-    ! Calculate 'total' ( tautotx ) and 'tms' ( tautmsx ) stresses that      !
-    ! have been actually added into the atmosphere at the current time step. !
-    ! Also, update residual stress, if required.                             !
-    ! ---------------------------------------------------------------------- !
-
-    do i = 1, ncol
       ! Compute the implicit 'tms' using the updated winds.
       ! Below 'tautmsx(i),tautmsy(i)' are pure implicit mountain stresses
       ! that has been actually added into the atmosphere both for explicit
@@ -584,18 +600,20 @@ contains
       ! We may want to rethink the residual drag calculation performed here on. (jtb)
       taubljx(i) = 0._kind_phys
       taubljy(i) = 0._kind_phys
+      !$acc loop seq
       do k = 1, pver
-        taubljx(i) = taubljx(i) + (1._kind_phys/gravit)*dragblj(i, k)*u1(i, k)*p%del(i, k)
-        taubljy(i) = taubljy(i) + (1._kind_phys/gravit)*dragblj(i, k)*v1(i, k)*p%del(i, k)
+        taubljx(i) = taubljx(i) + (1._kind_phys/gravit)*dragblj(i, k)*u1(i, k)*del(i, k)
+        taubljy(i) = taubljy(i) + (1._kind_phys/gravit)*dragblj(i, k)*v1(i, k)*del(i, k)
       end do
 
       if (do_iss) then
         ! Compute vertical integration of final horizontal momentum
         usum_out(i) = 0._kind_phys
         vsum_out(i) = 0._kind_phys
+        !$acc loop seq
         do k = 1, pver
-          usum_out(i) = usum_out(i) + (1._kind_phys/gravit)*u1(i, k)*p%del(i, k)
-          vsum_out(i) = vsum_out(i) + (1._kind_phys/gravit)*v1(i, k)*p%del(i, k)
+          usum_out(i) = usum_out(i) + (1._kind_phys/gravit)*u1(i, k)*del(i, k)
+          vsum_out(i) = vsum_out(i) + (1._kind_phys/gravit)*v1(i, k)*del(i, k)
         end do
 
         ! Compute net stress added into the atmosphere at the current time step.
@@ -623,64 +641,56 @@ contains
         tauresx(i) = 0._kind_phys
         tauresy(i) = 0._kind_phys
       end if  ! End of 'do_iss' if
-    end do ! End of 'do i = 1, ncol' loop
 
-    ! ------------------------------------ !
-    ! Calculate kinetic energy dissipation !
-    ! ------------------------------------ !
+      ! ------------------------------------ !
+      ! Calculate kinetic energy dissipation !
+      ! ------------------------------------ !
 
-    ! Modification : In future, this should be set exactly same as
-    !                the ones in the convection schemes
+      ! Modification : In future, this should be set exactly same as
+      !                the ones in the convection schemes
 
-    if (do_beljaars) then
-      ! 2. Add Kinetic Energy change across dissipation to Static Energy
-      do k = 1, pver
-        do i = 1, ncol
+      if (do_beljaars) then
+        ! 2. Add Kinetic Energy change across dissipation to Static Energy
+        !$acc loop seq
+        do k = 1, pver
           keg_in(i, k) = 0.5_kind_phys*(u0(i, k)*u0(i, k) + v0(i, k)*v0(i, k))
           keg_out(i, k) = 0.5_kind_phys*(u1(i, k)*u1(i, k) + v1(i, k)*v1(i, k))
-        end do
-      end do
-
-      do k = 1, pver
-        do i = 1, ncol
           dtk(i, k) = keg_in(i, k) - keg_out(i, k)
           dse1(i, k) = dse1(i, k) + dtk(i, k) ! + dkeblj(i,k)
         end do
-      end do
-    else
-      ! .not. do_beljaars
+      else
+        ! .not. do_beljaars
 
-      ! 1. Compute dissipation term at interfaces
-      !    Note that 'u,v' are already diffused wind, and 'tautotx,tautoty' are
-      !    implicit stress that has been actually added. On the other hand,
-      !    'dinp_u, dinp_v' were computed using non-diffused input wind.
+        ! 1. Compute dissipation term at interfaces
+        !    Note that 'u,v' are already diffused wind, and 'tautotx,tautoty' are
+        !    implicit stress that has been actually added. On the other hand,
+        !    'dinp_u, dinp_v' were computed using non-diffused input wind.
 
-      ! Modification : I should check whether non-consistency between 'u' and 'dinp_u'
-      !                is correctly intended approach. I think so.
-      k = pver + 1
-      do i = 1, ncol
+        ! Modification : I should check whether non-consistency between 'u' and 'dinp_u'
+        !                is correctly intended approach. I think so.
         tmpi1(i, 1) = 0._kind_phys
-        tmpi1(i, k) = 0.5_kind_phys*dt*gravit* &
-                      ((-u1(i, k - 1) + dinp_u(i, k))*tautotx(i) + (-v1(i, k - 1) + dinp_v(i, k))*tautoty(i))
-      end do
+        tmpi1(i, pver + 1) = 0.5_kind_phys*dt*gravit* &
+                      ((-u1(i, pver) + dinp_u(i, pver + 1))*tautotx(i) &
+                       + (-v1(i, pver) + dinp_v(i, pver + 1))*tautoty(i))
 
-      do k = 2, pver
-        do i = 1, ncol
+        !$acc loop seq
+        do k = 2, pver
           dout_u = u1(i, k) - u1(i, k - 1)
           dout_v = v1(i, k) - v1(i, k - 1)
           tmpi1(i, k) = 0.25_kind_phys*tmpi2(i, k)*kvm(i, k)* &
                         (dout_u**2 + dout_v**2 + dout_u*dinp_u(i, k) + dout_v*dinp_v(i, k))
         end do
-      end do
 
-      ! 2. Compute dissipation term at midpoints, add to dry static energy
-      do k = 1, pver
-        do i = 1, ncol
-          dtk(i, k) = (tmpi1(i, k + 1) + tmpi1(i, k))*p%rdel(i, k)
+        ! 2. Compute dissipation term at midpoints, add to dry static energy
+        !$acc loop seq
+        do k = 1, pver
+          dtk(i, k) = (tmpi1(i, k + 1) + tmpi1(i, k))*rdel(i, k)
           dse1(i, k) = dse1(i, k) + dtk(i, k)
         end do
-      end do
-    end if
+      end if
+    end do
+
+    !$acc end data
 
     ! End of kinetic energy dissipation due to horizontal momentum diffusion
   end subroutine vertical_diffusion_diffuse_horizontal_momentum_run
@@ -759,7 +769,7 @@ contains
     ncol, pver, &
     dt, &
     gravit, &
-    p, rhoi, &
+    pint, rhoi, &
     shflx, &
     dse_top, &
     kvh, cgh, &
@@ -768,10 +778,8 @@ contains
     dse, &
     errmsg, errflg)
 
-    use coords_1d, only: Coords1D
-    use linear_1d_operators, only: BoundaryType, BoundaryFixedLayer, &
-                                   BoundaryData
-    use vertical_diffusion_solver, only: fin_vol_solve
+    use atmos_phys_fin_vol_solver, only: fin_vol_coords_column, fin_vol_decomp_column, &
+                                         fin_vol_left_div_column
 
     ! Input Arguments
     integer,         intent(in)       :: ncol
@@ -779,7 +787,7 @@ contains
     real(kind_phys), intent(in)       :: dt               ! physics timestep [s]
 
     real(kind_phys), intent(in)       :: gravit
-    type(coords1d),  intent(in)       :: p                ! Pressure coordinates [Pa]
+    real(kind_phys), intent(in)       :: pint(:, :)       ! Air pressure at interfaces [Pa]
     real(kind_phys), intent(in)       :: rhoi(:, :)       ! Density of air at interfaces [kg m-3]
     real(kind_phys), intent(in)       :: shflx(:)         ! Surface sensible heat flux [W m-2]
     real(kind_phys), intent(in)       :: dse_top(:)       ! Dry static energy top boundary condition.
@@ -793,43 +801,56 @@ contains
     integer,            intent(out)   :: errflg  ! error flag
 
     ! Local variables
-    integer :: k
-    type(BoundaryType) :: interface_boundary     ! Boundary layer objects
+    integer :: i, k
 
     real(kind_phys) :: flux_to_state_conversion_factor(ncol)
+
+    ! Pressure coordinates (as Coords1D(pint)) and the tridiagonal decomposition
+    real(kind_phys) :: mid(ncol, pver), del(ncol, pver), rdel(ncol, pver)
+    real(kind_phys) :: rdst(ncol, pver-1)
+    real(kind_phys) :: ca(ncol, pver), ze(ncol, pver), dnom(ncol, pver)
 
     errmsg = ''
     errflg = 0
 
-    ! Boundary condition for a fixed concentration directly on a boundary
-    ! interface (i.e. a boundary layer of size 0).
-    interface_boundary = BoundaryFixedLayer(spread(0._kind_phys, 1, ncol))
+    ! OpenACC: one column per thread, levels in order.
+    !$acc data copyin(pint, rhoi, shflx, dse_top, kvh, cgh, dpidz_sq) copy(dse) &
+    !$acc      create(flux_to_state_conversion_factor, mid, del, rdel, rdst, ca, ze, dnom)
 
-    flux_to_state_conversion_factor(:ncol) = dt*gravit*p%rdel(:, pver)
+    !$acc parallel loop gang vector private(k)
+    do i = 1, ncol
+      call fin_vol_coords_column(i, pver, pint, mid, del, rdel, rdst)
 
-    ! Modification : In future, we should diffuse the fully conservative
-    !                moist static energy, not the dry static energy.
+      flux_to_state_conversion_factor(i) = dt*gravit*rdel(i, pver)
 
-    ! Add counter-gradient to input static energy profiles
-    do k = 1, pver
-      dse(:ncol, k) = dse(:ncol, k) + dt*p%rdel(:, k)*gravit* &
-                      (rhoi(:ncol, k + 1)*kvh(:ncol, k + 1)*cgh(:ncol, k + 1) &
-                       - rhoi(:ncol, k)*kvh(:ncol, k)*cgh(:ncol, k))
+      ! Modification : In future, we should diffuse the fully conservative
+      !                moist static energy, not the dry static energy.
+
+      ! Add counter-gradient to input static energy profiles
+      !$acc loop seq
+      do k = 1, pver
+        dse(i, k) = dse(i, k) + dt*rdel(i, k)*gravit* &
+                    (rhoi(i, k + 1)*kvh(i, k + 1)*cgh(i, k + 1) &
+                     - rhoi(i, k)*kvh(i, k)*cgh(i, k))
+      end do
+
+      ! Add the explicit surface fluxes to the lowest layer
+      dse(i, pver) = dse(i, pver) + flux_to_state_conversion_factor(i)*shflx(i)
+
+      !---------------------------------------------------
+      ! Solve for temperature using thermal conductivity
+      !---------------------------------------------------
+
+      ! Boundary layer thickness of "0._kind_phys" signifies that the boundary
+      ! condition is defined directly on the top interface.
+      ! (fin_vol_solve with coef_q_diff=kvh*dpidz_sq, upper_bndry a fixed layer
+      ! of width 0 (BoundaryFixedLayer) and l_cond=BoundaryData(dse_top).)
+      call fin_vol_decomp_column(i, pver, dt, del, rdel, rdst, kvh, dpidz_sq, &
+                                 ca, ze, dnom, top_width=0._kind_phys)
+      call fin_vol_left_div_column(i, pver, ca, ze, dnom, dse, top_value=dse_top(i))
     end do
 
-    ! Add the explicit surface fluxes to the lowest layer
-    dse(:ncol, pver) = dse(:ncol, pver) + flux_to_state_conversion_factor(:ncol)*shflx(:ncol)
-
-    !---------------------------------------------------
-    ! Solve for temperature using thermal conductivity
-    !---------------------------------------------------
-
-    ! Boundary layer thickness of "0._kind_phys" signifies that the boundary
-    ! condition is defined directly on the top interface.
-    dse(:ncol, :) = fin_vol_solve(dt, p, dse(:ncol, :), ncol, pver, &
-                                  coef_q_diff=kvh(:ncol, :)*dpidz_sq(:ncol, :), &
-                                  upper_bndry=interface_boundary, &
-                                  l_cond=BoundaryData(dse_top(:ncol)))
+    !$acc end data
 
   end subroutine vertical_diffusion_diffuse_dry_static_energy_run
 
@@ -918,7 +939,7 @@ contains
     rair, &
     gravit, &
     do_diffusion_const, &
-    p, &
+    pint, &
     t, &
     rhoi, &
     cflx, &
@@ -932,9 +953,8 @@ contains
     q1, &
     errmsg, errflg)
 
-    use coords_1d, only: Coords1D
-    use linear_1d_operators, only: TriDiagDecomp
-    use vdiff_lu_solver, only: fin_vol_lu_decomp
+    use atmos_phys_fin_vol_solver, only: fin_vol_coords_column, fin_vol_decomp_column, &
+                                         fin_vol_left_div_column_3d
 
     ! Input arguments
     integer,         intent(in)       :: ncol             ! Number of atmospheric columns
@@ -945,7 +965,7 @@ contains
     real(kind_phys), intent(in)       :: gravit
     logical,         intent(in)       :: do_diffusion_const(:) ! diffuse constituents (size ncnst) [flag]
 
-    type(coords1d),  intent(in)       :: p                ! Pressure coordinates [Pa]
+    real(kind_phys), intent(in)       :: pint(:, :)       ! Air pressure at interfaces [Pa]
     real(kind_phys), intent(in)       :: t(:, :)          ! Temperature [K]
     real(kind_phys), intent(in)       :: rhoi(:, :)       ! Density of air at interfaces [kg m-3]
 
@@ -972,61 +992,98 @@ contains
     integer,            intent(out)   :: errflg  ! error flag
 
     ! Local variables
-    integer :: m, k
-    type(TriDiagDecomp) :: no_molec_decomp       ! LU decomposition information.
+    integer :: i, m, k
     real(kind_phys) :: flux_to_state_conversion_factor(ncol)
     logical  :: lqtst(ncol)                      ! Adjust vertical profiles
     real(kind_phys) :: qtm(ncol, pver)           ! Temporary copy of q
     real(kind_phys) :: rrho(ncol)                ! 1./bottom level density
 
+    ! Pressure coordinates (as Coords1D(pint)) and the tridiagonal decomposition
+    real(kind_phys) :: mid(ncol, pver), del(ncol, pver), rdel(ncol, pver)
+    real(kind_phys) :: rdst(ncol, pver-1)
+    real(kind_phys) :: ca(ncol, pver), ze(ncol, pver), dnom(ncol, pver)
+
     errmsg = ''
     errflg = 0
 
-    ! Set initial iterative outputs to input values
-    q1(:ncol,:pver,:ncnst) = q0(:ncol,:pver,:ncnst)
+    ! OpenACC: one column per thread, levels and constituents in order (each
+    ! column's operations are those of the former whole-array code, in the same
+    ! order).
+    !$acc data copyin(pint, t, rhoi, cflx, kvh, kvq, cgs, qmincg, dpidz_sq, ubc_mmr, &
+    !$acc             do_diffusion_const, cnst_fixed_ubc, q0) &
+    !$acc      copyout(q1) &
+    !$acc      create(flux_to_state_conversion_factor, lqtst, qtm, rrho, &
+    !$acc             mid, del, rdel, rdst, ca, ze, dnom)
 
-    ! necessary temporaries used in computation
-    rrho(:ncol) = rair*t(:ncol, pver)/p%mid(:, pver)
-    flux_to_state_conversion_factor(:ncol) = dt*gravit*p%rdel(:, pver)
+    !$acc parallel loop gang vector private(k, m)
+    do i = 1, ncol
+      call fin_vol_coords_column(i, pver, pint, mid, del, rdel, rdst)
 
-    ! Loop through constituents
-    no_molec_decomp = fin_vol_lu_decomp(dt, p, &
-                                        coef_q_diff=kvq(:ncol, :)*dpidz_sq(:ncol, :))
-
-    do m = 1, ncnst
-      if (do_diffusion_const(m)) then
-        ! Add the nonlocal transport terms to constituents in the PBL.
-        ! Check for neg q's in each constituent and put the original vertical
-        ! profile back if a neg value is found. A neg value implies that the
-        ! quasi-equilibrium conditions assumed for the countergradient term are
-        ! strongly violated.
-        qtm(:ncol, :pver) = q1(:ncol, :pver, m)
-
+      ! Set initial iterative outputs to input values
+      !$acc loop seq
+      do m = 1, ncnst
+        !$acc loop seq
         do k = 1, pver
-          q1(:ncol, k, m) = q1(:ncol, k, m) + &
-                            dt*p%rdel(:, k)*gravit*(cflx(:ncol, m)*rrho(:ncol))* &
-                            (rhoi(:ncol, k + 1)*kvh(:ncol, k + 1)*cgs(:ncol, k + 1) &
-                             - rhoi(:ncol, k)*kvh(:ncol, k)*cgs(:ncol, k))
+          q1(i,k,m) = q0(i,k,m)
         end do
-        lqtst(:ncol) = all(q1(:ncol, 1:pver, m) >= qmincg(m), 2)
-        do k = 1, pver
-          q1(:ncol, k, m) = merge(q1(:ncol, k, m), qtm(:ncol, k), lqtst(:ncol))
-        end do
+      end do
 
-        ! Add the explicit surface fluxes to the lowest layer
-        q1(:ncol, pver, m) = q1(:ncol, pver, m) + flux_to_state_conversion_factor(:ncol)*cflx(:ncol, m)
+      ! necessary temporaries used in computation
+      rrho(i) = rair*t(i, pver)/mid(i, pver)
+      flux_to_state_conversion_factor(i) = dt*gravit*rdel(i, pver)
 
-        ! not doing molecular diffusion
-        ! explicitly set mmr in top layer for cases where molecular diffusion is not active
-        if (cnst_fixed_ubc(m)) then
-          ! assumes TOA is at vertical level 1 here.
-          q1(:ncol, 1, m) = ubc_mmr(:ncol, m)
+      ! LU decomposition (fin_vol_lu_decomp with coef_q_diff=kvq*dpidz_sq)
+      call fin_vol_decomp_column(i, pver, dt, del, rdel, rdst, kvq, dpidz_sq, ca, ze, dnom)
+
+      ! Loop through constituents
+      !$acc loop seq
+      do m = 1, ncnst
+        if (do_diffusion_const(m)) then
+          ! Add the nonlocal transport terms to constituents in the PBL.
+          ! Check for neg q's in each constituent and put the original vertical
+          ! profile back if a neg value is found. A neg value implies that the
+          ! quasi-equilibrium conditions assumed for the countergradient term are
+          ! strongly violated.
+          !$acc loop seq
+          do k = 1, pver
+            qtm(i, k) = q1(i, k, m)
+          end do
+
+          !$acc loop seq
+          do k = 1, pver
+            q1(i, k, m) = q1(i, k, m) + &
+                          dt*rdel(i, k)*gravit*(cflx(i, m)*rrho(i))* &
+                          (rhoi(i, k + 1)*kvh(i, k + 1)*cgs(i, k + 1) &
+                           - rhoi(i, k)*kvh(i, k)*cgs(i, k))
+          end do
+          ! lqtst = all(q1(i,1:pver,m) >= qmincg(m)); else the original profile
+          lqtst(i) = .true.
+          !$acc loop seq
+          do k = 1, pver
+            if (.not. (q1(i, k, m) >= qmincg(m))) lqtst(i) = .false.
+          end do
+          if (.not. lqtst(i)) then
+            !$acc loop seq
+            do k = 1, pver
+              q1(i, k, m) = qtm(i, k)
+            end do
+          end if
+
+          ! Add the explicit surface fluxes to the lowest layer
+          q1(i, pver, m) = q1(i, pver, m) + flux_to_state_conversion_factor(i)*cflx(i, m)
+
+          ! not doing molecular diffusion
+          ! explicitly set mmr in top layer for cases where molecular diffusion is not active
+          if (cnst_fixed_ubc(m)) then
+            ! assumes TOA is at vertical level 1 here.
+            q1(i, 1, m) = ubc_mmr(i, m)
+          end if
+          call fin_vol_left_div_column_3d(i, pver, m, ca, ze, dnom, q1)
         end if
-        call no_molec_decomp%left_div(q1(:ncol, :, m))
-      end if
+      end do
     end do
 
-    call no_molec_decomp%finalize()
+    !$acc end data
 
   end subroutine vertical_diffusion_diffuse_tracers_run
 

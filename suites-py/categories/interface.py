@@ -30,6 +30,9 @@ class Parameterization:
         energy_flux_correction: Run after ``run`` and before the category's
             energy and water budget check, for a parameterization whose
             boundary fluxes need adjusting first.
+        inputs: Inputs only this parameterization needs, run by the
+            category right after its own input preparation (e.g. the
+            pressure-coordinate object the UW boundary layer reads).
     """
 
     name: str
@@ -37,6 +40,7 @@ class Parameterization:
     setup: Optional[Callable[[], None]] = None
     diagnostics: Optional[Callable[[], None]] = None
     energy_flux_correction: Optional[Callable[[], None]] = None
+    inputs: Optional[Callable[[], None]] = None
 
 
 def run_setup(parameterization: Optional[Parameterization]) -> None:

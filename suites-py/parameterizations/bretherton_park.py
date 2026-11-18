@@ -9,6 +9,9 @@ bretherton_park_diff                  = ccpp_scheme_ref("bretherton_park_diff")
 bretherton_park_diff_diagnostics      = ccpp_scheme_ref("bretherton_park_diff_diagnostics")
 compute_kinematic_fluxes_and_obklen   = ccpp_scheme_ref("compute_kinematic_fluxes_and_obklen")
 eddy_diffusivity_adjustment_above_pbl = ccpp_scheme_ref("eddy_diffusivity_adjustment_above_pbl")
+# The pressure-coordinate object (coords1d) bretherton_park_diff reads; the
+# vertical diffusion schemes themselves work from pint.
+vertical_diffusion_pressure_coordinates = ccpp_scheme_ref("vertical_diffusion_pressure_coordinates")
 
 
 @ccpp_composite
@@ -20,4 +23,5 @@ def bretherton_park_coefficients():
 
 
 uw_bretherton_park = Parameterization(name="UW (Bretherton-Park) boundary layer",
-                                      run=bretherton_park_coefficients)
+                                      run=bretherton_park_coefficients,
+                                      inputs=vertical_diffusion_pressure_coordinates)

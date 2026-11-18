@@ -251,11 +251,11 @@
   type = real | kind = kind_phys
   dimensions = ()
   intent = in
-[ p ]
-  standard_name = vertical_moist_pressure_coordinates_for_vertical_diffusion
-  units = none
-  type = coords1d
-  dimensions = ()
+[ pint ]
+  standard_name = air_pressure_at_interface
+  units = Pa
+  dimensions = (horizontal_loop_extent, vertical_interface_dimension)
+  type = real | kind = kind_phys
   intent = in
 [ ksrf ]
   standard_name = total_drag_coefficient_at_surface
@@ -389,11 +389,11 @@
   type = logical
   dimensions = ()
   intent = in
-[ p ]
-  standard_name = vertical_moist_pressure_coordinates_for_vertical_diffusion
-  units = none
-  type = coords1d
-  dimensions = ()
+[ pint ]
+  standard_name = air_pressure_at_interface
+  units = Pa
+  dimensions = (horizontal_loop_extent, vertical_interface_dimension)
+  type = real | kind = kind_phys
   intent = in
 [ t ]
   standard_name = air_temperature
@@ -647,11 +647,11 @@
   type = real | kind = kind_phys
   dimensions = ()
   intent = in
-[ p ]
-  standard_name = vertical_moist_pressure_coordinates_for_vertical_diffusion
-  units = none
-  type = coords1d
-  dimensions = ()
+[ pint ]
+  standard_name = air_pressure_at_interface
+  units = Pa
+  dimensions = (horizontal_loop_extent, vertical_interface_dimension)
+  type = real | kind = kind_phys
   intent = in
 [ rhoi ]
   standard_name = air_density_at_interfaces_for_vertical_diffusion
@@ -802,11 +802,11 @@
   type = logical
   dimensions = (number_of_ccpp_constituents)
   intent = in
-[ p ]
-  standard_name = vertical_moist_pressure_coordinates_for_vertical_diffusion
-  units = none
-  type = coords1d
-  dimensions = ()
+[ pint ]
+  standard_name = air_pressure_at_interface
+  units = Pa
+  dimensions = (horizontal_loop_extent, vertical_interface_dimension)
+  type = real | kind = kind_phys
   intent = in
 [ t ]
   standard_name = air_temperature

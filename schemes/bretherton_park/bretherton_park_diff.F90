@@ -366,6 +366,19 @@ contains
 
     real(kind_phys) :: jnk1d(ncol)
     real(kind_phys) :: jnk2d(ncol, pverp)
+
+    ! Copies of arguments this scheme changes on the host, passed to the
+    ! vertical diffusion schemes in its place. Those schemes run on the GPU,
+    ! and in a GPU build these arguments are already device data: their
+    ! present-or-copy clauses would use the device copy, which is stale while
+    ! this host scheme updates kvm, kvh, cgh, cgs and tauresx/y. Local arrays
+    ! are never device data, so the schemes copy them in (and out).
+    real(kind_phys) :: kvm_copy(ncol, pverp)
+    real(kind_phys) :: kvh_copy(ncol, pverp)
+    real(kind_phys) :: cgh_copy(ncol, pverp)
+    real(kind_phys) :: cgs_copy(ncol, pverp)
+    real(kind_phys) :: tauresx_copy(ncol)
+    real(kind_phys) :: tauresy_copy(ncol)
     real(kind_phys) :: zero(ncol)
     real(kind_phys) :: es                         ! Saturation vapor pressure
     real(kind_phys) :: qs                         ! Saturation specific humidity
@@ -431,7 +444,7 @@ contains
       ncol=ncol, &
       pver=pver, &
       gravit=gravit, &
-      p=p, & ! Coords1D, pressure coordinates [Pa]
+      pint=pint, &  ! Interface pressure [Pa]
       ksrf=ksrf(:ncol), &
       ! below output:
       tau_damp_rate=tau_damp_rate(:ncol, :pver), &
@@ -584,6 +597,9 @@ contains
       ufd_out(:, :) = 0._kind_phys
       vfd_out(:, :) = 0._kind_phys
       slfd_out(:, :) = 0._kind_phys
+      kvm_copy(:ncol, :pverp) = kvm(:ncol, :pverp)
+      tauresx_copy(:ncol) = tauresx(:ncol)
+      tauresy_copy(:ncol) = tauresy(:ncol)
       call vertical_diffusion_diffuse_horizontal_momentum_run( &
         ncol=ncol, &
         pver=pver, &
@@ -595,12 +611,12 @@ contains
         am_correction=am_correction, &
         itaures=.false., &
         t=t(:ncol, :pver), &
-        p=p, & ! Coords1D, pressure coordinates [Pa]
+        pint=pint, &  ! Interface pressure [Pa]
         rhoi=rhoi(:ncol, :pverp), &
         taux=taux(:ncol), &
         tauy=tauy(:ncol), &
         tau_damp_rate=tau_damp_rate(:ncol, :pver), & ! tau damp rate from above
-        kvm=kvm(:ncol, :pverp), &
+        kvm=kvm_copy(:ncol, :pverp), &
         ksrftms=ksrftms(:ncol), &
         dragblj=dragblj(:ncol, :pver), &
         dpidz_sq=dpidz_sq(:ncol, :pverp), & ! moist
@@ -609,8 +625,8 @@ contains
         dse0=slfd(:ncol, :pver), &
         ! input/output
         ! (not actually updated since itaures = .false. in this internal call.)
-        tauresx=tauresx(:ncol), &
-        tauresy=tauresy(:ncol), &
+        tauresx=tauresx_copy(:ncol), &
+        tauresy=tauresy_copy(:ncol), &
         ! below output
         u1=ufd_out(:ncol, :pver), &
         v1=vfd_out(:ncol, :pver), &
@@ -625,23 +641,28 @@ contains
 
       if (errflg /= 0) return
 
+      tauresx(:ncol) = tauresx_copy(:ncol)
+      tauresy(:ncol) = tauresy_copy(:ncol)
+
       ! Update u, v, dse with updated iterative values after diffusion solver
       ufd(:, :pver) = ufd_out(:, :pver)
       vfd(:, :pver) = vfd_out(:, :pver)
       slfd(:, :pver) = slfd_out(:, :pver)
 
       ! Diffuse dry static energy
+      kvh_copy(:ncol, :pverp) = kvh(:ncol, :pverp)
+      cgh_copy(:ncol, :pverp) = cgh(:ncol, :pverp)
       call vertical_diffusion_diffuse_dry_static_energy_run( &
         ncol=ncol, &
         pver=pver, &
         dt=dt, &
         gravit=gravit, &
-        p=p, & ! Coords1D, pressure coordinates [Pa]
+        pint=pint, &  ! Interface pressure [Pa]
         rhoi=rhoi(:ncol, :pverp), &
         shflx=shflx(:ncol), &
         dse_top=zero(:ncol), & ! = zero
-        kvh=kvh(:ncol, :pverp), &
-        cgh=cgh(:ncol, :pverp), &
+        kvh=kvh_copy(:ncol, :pverp), &
+        cgh=cgh_copy(:ncol, :pverp), &
         dpidz_sq=dpidz_sq(:ncol, :pverp), & ! moist
         ! input/output
         dse=slfd(:ncol, :pver), &
@@ -657,6 +678,7 @@ contains
       cnst_fixed_ubc(:1) = .false.
 
       qtfd_out(:, :, :) = 0._kind_phys
+      cgs_copy(:ncol, :pverp) = cgs(:ncol, :pverp)
       call vertical_diffusion_diffuse_tracers_run( &
         ncol = ncol, &
         pver = pver, &
@@ -665,13 +687,13 @@ contains
         rair = rair, &
         gravit = gravit, &
         do_diffusion_const = do_diffusion_const_wet, & ! moist constituents to diffuse
-        p = p, & ! Coords1D, pressure coordinates [Pa]
+        pint=pint, &  ! Interface pressure [Pa]
         t = t(:ncol, :pver), &
         rhoi = rhoi(:ncol, :pverp), &
         cflx = qflx(:ncol, const_wv_idx:const_wv_idx), & ! subset to water vapor only.
-        kvh = kvh(:ncol, :pverp), &
-        kvq = kvh(:ncol, :pverp), & ! [sic] kvh used for kvq here.
-        cgs = cgs(:ncol, :pverp), &
+        kvh = kvh_copy(:ncol, :pverp), &
+        kvq = kvh_copy(:ncol, :pverp), & ! [sic] kvh used for kvq here.
+        cgs = cgs_copy(:ncol, :pverp), &
         qmincg = zero(:ncol), &
         dpidz_sq = dpidz_sq(:ncol, :pverp), & ! moist
         ! upper boundary conditions from ubc module

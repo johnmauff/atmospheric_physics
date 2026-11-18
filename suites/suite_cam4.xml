@@ -362,7 +362,7 @@
     <!-- stub as TMS/Beljaars not used in CAM4 -->
     <scheme>tms_beljaars_zero_stub</scheme>
 
-    <!-- vdiff pre-interstitial 0: create p coords1d and potential temp. -->
+    <!-- vdiff pre-interstitial 0: potential temperature. -->
     <scheme>vertical_diffusion_prepare_inputs</scheme>
 
     <!-- vdiff pre-interstitial 1: copy surface fluxes from coupler (cam_in) -->
