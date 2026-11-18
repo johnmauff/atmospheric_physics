@@ -46,6 +46,11 @@ module zm_convr
    real(kind_phys) :: tiedke_add      ! namelist configurable
    real(kind_phys) :: dmpdz_param     ! namelist configurable
 
+   ! Settings read by the OpenACC kernels and device routines (set in zm_convr_init)
+   !$acc declare create(rl, cpres, capelmt, c0_lnd, c0_ocn, num_cin, tau, tfreez, eps1)
+   !$acc declare create(no_deep_pbl, rgrav, rgas, grav, cp, limcnv, lparcel_pbl)
+   !$acc declare create(parcel_hscale, tiedke_add, dmpdz_param)
+
 contains
 
 
@@ -139,6 +144,10 @@ subroutine zm_convr_init(plev, plevp, cpair, epsilo, gravit, latvap, tmelt, rair
       end do
       if ( limcnv == 0 ) limcnv = plevp
    end if
+
+   !$acc update device(rl, cpres, capelmt, c0_lnd, c0_ocn, num_cin, tau, tfreez, eps1)
+   !$acc update device(no_deep_pbl, rgrav, rgas, grav, cp, limcnv, lparcel_pbl)
+   !$acc update device(parcel_hscale, tiedke_add, dmpdz_param)
 
    if ( masterproc ) then
       write(iulog,*)'ZM_CONV_INIT: Deep convection will be capped at intfc ',limcnv, &
@@ -445,33 +454,55 @@ subroutine zm_convr_run(     ncol    ,pver    , &
 ! Set internal variable "msg" (convection limit) to "limcnv-1"
 !
    msg = limcnv - 1
+
+   ! OpenACC: everything below runs on the device. Arrays the caller already has on
+   ! the device are used in place (present-or-copy clauses). jt is copy, not copyout:
+   ! it is written only when some column convects.
+   !$acc data copyin(t, qh, pap, paph, dpp, zm, geos, zi, pblh, tpert, landfrac) &
+   !$acc      copyout(qtnd, heat, mcon, dlf, cme, cape, zdu, rprd, mu, eu, du, md, ed, dp) &
+   !$acc      copyout(dsubcld, prec, rliq, ideep, maxg, ql) copy(jt) &
+   !$acc      create(zs, dlg, cug, evpg, mumax, pblt, q, p, z, s, tp, zf, pf, qstp, tl) &
+   !$acc      create(lcl, lel, lon, maxi, qg, tg, pg, zg, sg, tpg, zfg, qstpg, ug, vg) &
+   !$acc      create(cmeg, rprdg, capeg, tlg, landfracg, lclg, lelg, dqdt, dsdt, sd, qd) &
+   !$acc      create(mc, qhat, qu, su, qs, shat, hmn, hsat, qlg, qldeg, mb, jlcl, j0, jd)
 !
 ! initialize necessary arrays.
 ! zero out variables not used in cam
 !
-
-
-   qtnd(:,:) = 0._kind_phys
-   heat(:,:) = 0._kind_phys
-   mcon(:,:) = 0._kind_phys
-   rliq(:ncol)   = 0._kind_phys
+   !$acc parallel loop collapse(2) default(present)
+   do k = 1,size(qtnd,2)
+      do i = 1,size(qtnd,1)
+         qtnd(i,k) = 0._kind_phys
+      end do
+   end do
+   !$acc parallel loop collapse(2) default(present)
+   do k = 1,size(heat,2)
+      do i = 1,size(heat,1)
+         heat(i,k) = 0._kind_phys
+      end do
+   end do
+   !$acc parallel loop collapse(2) default(present)
+   do k = 1,size(mcon,2)
+      do i = 1,size(mcon,1)
+         mcon(i,k) = 0._kind_phys
+      end do
+   end do
 
 ! The gathered outputs are computed only for the first lengath columns
 ! (none when no column convects); zero them over all columns so these
 ! intent(out) arrays are fully defined.
-   mu(:ncol,:) = 0._kind_phys
-   eu(:ncol,:) = 0._kind_phys
-   du(:ncol,:) = 0._kind_phys
-   md(:ncol,:) = 0._kind_phys
-   ed(:ncol,:) = 0._kind_phys
-   dp(:ncol,:) = 0._kind_phys
-
 !
 ! initialize convective tendencies
 !
-   prec(:ncol) = 0._kind_phys
+   !$acc parallel loop collapse(2) default(present)
    do k = 1,pver
       do i = 1,ncol
+         mu(i,k) = 0._kind_phys
+         eu(i,k) = 0._kind_phys
+         du(i,k) = 0._kind_phys
+         md(i,k) = 0._kind_phys
+         ed(i,k) = 0._kind_phys
+         dp(i,k) = 0._kind_phys
          dqdt(i,k)  = 0._kind_phys
          dsdt(i,k)  = 0._kind_phys
          cme(i,k)   = 0._kind_phys
@@ -482,26 +513,29 @@ subroutine zm_convr_run(     ncol    ,pver    , &
          dlf(i,k)   = 0._kind_phys
          dlg(i,k)   = 0._kind_phys
          qldeg(i,k) = 0._kind_phys
-
       end do
    end do
 
+   !$acc parallel loop default(present)
    do i = 1,ncol
-      pblt(i) = pver
+      rliq(i) = 0._kind_phys
+      prec(i) = 0._kind_phys
+      capeg(i) = 0._kind_phys
+      lclg(i) = 1
+      lelg(i) = pver
+      maxg(i) = 1
+      tlg(i) = 400._kind_phys
       dsubcld(i) = 0._kind_phys
-
-   end do
-
-
 !
 ! calculate local pressure (mbs) and height (m) for both interface
 ! and mid-layer locations.
 !
-   do i = 1,ncol
+      pblt(i) = pver
       zs(i) = geos(i)*rgrav
       pf(i,pver+1) = paph(i,pver+1)*0.01_kind_phys
       zf(i,pver+1) = zi(i,pver+1) + zs(i)
    end do
+   !$acc parallel loop collapse(2) default(present)
    do k = 1,pver
       do i = 1,ncol
          p(i,k) = pap(i,k)*0.01_kind_phys
@@ -511,8 +545,10 @@ subroutine zm_convr_run(     ncol    ,pver    , &
       end do
    end do
 !
-   do k = pver - 1,msg + 1,-1
-      do i = 1,ncol
+   !$acc parallel loop default(present)
+   do i = 1,ncol
+      !$acc loop seq
+      do k = pver - 1,msg + 1,-1
          if (abs(z(i,k)-zs(i)-pblh(i)) < (zf(i,k)-zf(i,k+1))*0.5_kind_phys) pblt(i) = k
       end do
    end do
@@ -521,6 +557,7 @@ subroutine zm_convr_run(     ncol    ,pver    , &
 ! of precipitation (through change in storage).
 ! define dry static energy (normalized by cp).
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = 1,pver
       do i = 1,ncol
          q(i,k) = qh(i,k)
@@ -530,16 +567,6 @@ subroutine zm_convr_run(     ncol    ,pver    , &
          qhat(i,k) = q(i,k)
       end do
    end do
-
-   do i = 1,ncol
-      capeg(i) = 0._kind_phys
-      lclg(i) = 1
-      lelg(i) = pver
-      maxg(i) = 1
-      tlg(i) = 400._kind_phys
-      dsubcld(i) = 0._kind_phys
-   end do
-
 
    !  Evaluate Tparcel, qs(Tparcel), buoyancy and CAPE,
    !     lcl, lel, parcel launch level at index maxi()=hmax
@@ -557,225 +584,232 @@ subroutine zm_convr_run(     ncol    ,pver    , &
 ! determine whether grid points will undergo some deep convection
 ! (ideep=1) or not (ideep=0), based on values of cape,lcl,lel
 ! (require cape.gt. 0 and lel<lcl as minimum conditions).
+! The gather keeps the column order: one sequential device loop. lengath comes back
+! to the host for the loop bounds below.
 !
+   !$acc parallel loop default(present)
+   do i = 1,size(ideep)
+      ideep(i) = 0
+   end do
    lengath = 0
-   ideep   = 0
+   !$acc serial default(present) copy(lengath)
    do i=1,ncol
       if (cape(i) > capelmt) then
          lengath = lengath + 1
          ideep(lengath) = i
       end if
    end do
+   !$acc end serial
 
-   if (lengath.eq.0) return
+   ! (A branch out of the data region is not allowed, hence the block.)
+   if (lengath > 0) then
 !
 ! obtain gathered arrays necessary for ensuing calculations.
 !
-   do k = 1,pver
-      do i = 1,lengath
-         dp(i,k) = 0.01_kind_phys*dpp(ideep(i),k)
-         qg(i,k) = q(ideep(i),k)
-         tg(i,k) = t(ideep(i),k)
-         pg(i,k) = p(ideep(i),k)
-         zg(i,k) = z(ideep(i),k)
-         sg(i,k) = s(ideep(i),k)
-         tpg(i,k) = tp(ideep(i),k)
-         zfg(i,k) = zf(ideep(i),k)
-         qstpg(i,k) = qstp(ideep(i),k)
-         ug(i,k) = 0._kind_phys
-         vg(i,k) = 0._kind_phys
+      !$acc parallel loop collapse(2) default(present)
+      do k = 1,pver
+         do i = 1,lengath
+            dp(i,k) = 0.01_kind_phys*dpp(ideep(i),k)
+            qg(i,k) = q(ideep(i),k)
+            tg(i,k) = t(ideep(i),k)
+            pg(i,k) = p(ideep(i),k)
+            zg(i,k) = z(ideep(i),k)
+            sg(i,k) = s(ideep(i),k)
+            tpg(i,k) = tp(ideep(i),k)
+            zfg(i,k) = zf(ideep(i),k)
+            qstpg(i,k) = qstp(ideep(i),k)
+            ug(i,k) = 0._kind_phys
+            vg(i,k) = 0._kind_phys
+         end do
       end do
-   end do
-
 !
-   do i = 1,lengath
-      zfg(i,pver+1) = zf(ideep(i),pver+1)
-   end do
-   do i = 1,lengath
-      capeg(i) = cape(ideep(i))
-      lclg(i) = lcl(ideep(i))
-      lelg(i) = lel(ideep(i))
-      maxg(i) = maxi(ideep(i))
-      tlg(i) = tl(ideep(i))
-      landfracg(i) = landfrac(ideep(i))
-   end do
+      !$acc parallel loop default(present)
+      do i = 1,lengath
+         zfg(i,pver+1) = zf(ideep(i),pver+1)
+         capeg(i) = cape(ideep(i))
+         lclg(i) = lcl(ideep(i))
+         lelg(i) = lel(ideep(i))
+         maxg(i) = maxi(ideep(i))
+         tlg(i) = tl(ideep(i))
+         landfracg(i) = landfrac(ideep(i))
+      end do
 !
 ! calculate sub-cloud layer pressure "thickness" for use in
 ! closure and tendency routines.
 !
-   do k = msg + 1,pver
+      !$acc parallel loop default(present)
       do i = 1,lengath
-         if (k >= maxg(i)) then
-            dsubcld(i) = dsubcld(i) + dp(i,k)
-         end if
+         !$acc loop seq
+         do k = msg + 1,pver
+            if (k >= maxg(i)) then
+               dsubcld(i) = dsubcld(i) + dp(i,k)
+            end if
+         end do
       end do
-   end do
 !
 ! define array of factors (alpha) which defines interfacial
 ! values, as well as interfacial values for (q,s) used in
 ! subsequent routines.
 !
-   do k = msg + 2,pver
-      do i = 1,lengath
-         sdifr = 0._kind_phys
-         qdifr = 0._kind_phys
-         if (sg(i,k) > 0._kind_phys .or. sg(i,k-1) > 0._kind_phys) &
-            sdifr = abs((sg(i,k)-sg(i,k-1))/max(sg(i,k-1),sg(i,k)))
-         if (qg(i,k) > 0._kind_phys .or. qg(i,k-1) > 0._kind_phys) &
-            qdifr = abs((qg(i,k)-qg(i,k-1))/max(qg(i,k-1),qg(i,k)))
-         if (sdifr > 1.E-6_kind_phys) then
-            shat(i,k) = log(sg(i,k-1)/sg(i,k))*sg(i,k-1)*sg(i,k)/(sg(i,k-1)-sg(i,k))
-         else
-            shat(i,k) = 0.5_kind_phys* (sg(i,k)+sg(i,k-1))
-         end if
-         if (qdifr > 1.E-6_kind_phys) then
-            qhat(i,k) = log(qg(i,k-1)/qg(i,k))*qg(i,k-1)*qg(i,k)/(qg(i,k-1)-qg(i,k))
-         else
-            qhat(i,k) = 0.5_kind_phys* (qg(i,k)+qg(i,k-1))
-         end if
+      !$acc parallel loop collapse(2) default(present) private(sdifr, qdifr)
+      do k = msg + 2,pver
+         do i = 1,lengath
+            sdifr = 0._kind_phys
+            qdifr = 0._kind_phys
+            if (sg(i,k) > 0._kind_phys .or. sg(i,k-1) > 0._kind_phys) &
+               sdifr = abs((sg(i,k)-sg(i,k-1))/max(sg(i,k-1),sg(i,k)))
+            if (qg(i,k) > 0._kind_phys .or. qg(i,k-1) > 0._kind_phys) &
+               qdifr = abs((qg(i,k)-qg(i,k-1))/max(qg(i,k-1),qg(i,k)))
+            if (sdifr > 1.E-6_kind_phys) then
+               shat(i,k) = log(sg(i,k-1)/sg(i,k))*sg(i,k-1)*sg(i,k)/(sg(i,k-1)-sg(i,k))
+            else
+               shat(i,k) = 0.5_kind_phys* (sg(i,k)+sg(i,k-1))
+            end if
+            if (qdifr > 1.E-6_kind_phys) then
+               qhat(i,k) = log(qg(i,k-1)/qg(i,k))*qg(i,k-1)*qg(i,k)/(qg(i,k-1)-qg(i,k))
+            else
+               qhat(i,k) = 0.5_kind_phys* (qg(i,k)+qg(i,k-1))
+            end if
+         end do
       end do
-   end do
 !
 ! obtain cloud properties.
 !
-
-   call cldprp(ncol   ,pver    ,pverp   ,cpliq  , &
-               latice  ,cpwv    ,rh2o    ,&
-               qg      ,tg      ,ug      ,vg      ,pg      , &
-               zg      ,sg      ,mu      ,eu      ,du      , &
-               md      ,ed      ,sd      ,qd      ,mc      , &
-               qu      ,su      ,zfg     ,qs      ,hmn     , &
-               hsat    ,shat    ,qlg     , &
-               cmeg    ,maxg    ,lelg    ,jt      ,jlcl    , &
-               maxg    ,j0      ,jd      ,rl      ,lengath , &
-               rgas    ,grav    ,cpres   ,msg     , &
-               evpg    ,cug     ,rprdg   ,limcnv  ,landfracg , &
-               qldeg    ,qhat    )
-
-
+      call cldprp(ncol   ,pver    ,pverp   ,cpliq  , &
+                  latice  ,cpwv    ,rh2o    ,&
+                  qg      ,tg      ,ug      ,vg      ,pg      , &
+                  zg      ,sg      ,mu      ,eu      ,du      , &
+                  md      ,ed      ,sd      ,qd      ,mc      , &
+                  qu      ,su      ,zfg     ,qs      ,hmn     , &
+                  hsat    ,shat    ,qlg     , &
+                  cmeg    ,maxg    ,lelg    ,jt      ,jlcl    , &
+                  maxg    ,j0      ,jd      ,rl      ,lengath , &
+                  rgas    ,grav    ,cpres   ,msg     , &
+                  evpg    ,cug     ,rprdg   ,limcnv  ,landfracg , &
+                  qldeg    ,qhat    )
 !
 ! convert detrainment from units of "1/m" to "1/mb".
 !
-
-   do k = msg + 1,pver
-      do i = 1,lengath
-         du   (i,k) = du   (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
-         eu   (i,k) = eu   (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
-         ed   (i,k) = ed   (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
-         cug  (i,k) = cug  (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
-         cmeg (i,k) = cmeg (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
-         rprdg(i,k) = rprdg(i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
-         evpg (i,k) = evpg (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
+      !$acc parallel loop collapse(2) default(present)
+      do k = msg + 1,pver
+         do i = 1,lengath
+            du   (i,k) = du   (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
+            eu   (i,k) = eu   (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
+            ed   (i,k) = ed   (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
+            cug  (i,k) = cug  (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
+            cmeg (i,k) = cmeg (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
+            rprdg(i,k) = rprdg(i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
+            evpg (i,k) = evpg (i,k)* (zfg(i,k)-zfg(i,k+1))/dp(i,k)
+         end do
       end do
-   end do
 
-   call closure(ncol   ,pver    , &
-                qg      ,tg      ,pg      ,zg      ,sg      , &
-                tpg     ,qs      ,qu      ,su      ,mc      , &
-                du      ,mu      ,md      ,qd      ,sd      , &
-                qhat    ,shat    ,dp      ,qstpg   ,zfg     , &
-                qlg     ,dsubcld ,mb      ,capeg   ,tlg     , &
-                lclg    ,lelg    ,jt      ,maxg    ,1       , &
-                lengath ,rgas    ,grav    ,cpres   ,rl      , &
-                msg     ,capelmt    )
+      call closure(ncol   ,pver    , &
+                   qg      ,tg      ,pg      ,zg      ,sg      , &
+                   tpg     ,qs      ,qu      ,su      ,mc      , &
+                   du      ,mu      ,md      ,qd      ,sd      , &
+                   qhat    ,shat    ,dp      ,qstpg   ,zfg     , &
+                   qlg     ,dsubcld ,mb      ,capeg   ,tlg     , &
+                   lclg    ,lelg    ,jt      ,maxg    ,1       , &
+                   lengath ,rgas    ,grav    ,cpres   ,rl      , &
+                   msg     ,capelmt    )
 !
 ! limit cloud base mass flux to theoretical upper bound.
+! If no_deep_pbl = .true., don't allow convection entirely
+! within PBL (suggestion of Bjorn Stevens, 8-2000)
 !
-   do i=1,lengath
-      mumax(i) = 0
-   end do
-   do k=msg + 2,pver
+      !$acc parallel loop default(present)
       do i=1,lengath
-        mumax(i) = max(mumax(i), mu(i,k)/dp(i,k))
+         mumax(i) = 0
+         !$acc loop seq
+         do k=msg + 2,pver
+           mumax(i) = max(mumax(i), mu(i,k)/dp(i,k))
+         end do
+         if (mumax(i) > 0._kind_phys) then
+            mb(i) = min(mb(i),1._kind_phys/(delt*mumax(i)))
+         else
+            mb(i) = 0._kind_phys
+         endif
+         if (no_deep_pbl) then
+            if (zm(ideep(i),jt(i)) < pblh(ideep(i))) mb(i) = 0
+         end if
       end do
-   end do
 
-   do i=1,lengath
-      if (mumax(i) > 0._kind_phys) then
-         mb(i) = min(mb(i),1._kind_phys/(delt*mumax(i)))
-      else
-         mb(i) = 0._kind_phys
-      endif
-   end do
-   ! If no_deep_pbl = .true., don't allow convection entirely
-   ! within PBL (suggestion of Bjorn Stevens, 8-2000)
-
-   if (no_deep_pbl) then
-      do i=1,lengath
-         if (zm(ideep(i),jt(i)) < pblh(ideep(i))) mb(i) = 0
+      !$acc parallel loop collapse(2) default(present)
+      do k=msg+1,pver
+         do i=1,lengath
+            mu   (i,k)  = mu   (i,k)*mb(i)
+            md   (i,k)  = md   (i,k)*mb(i)
+            mc   (i,k)  = mc   (i,k)*mb(i)
+            du   (i,k)  = du   (i,k)*mb(i)
+            eu   (i,k)  = eu   (i,k)*mb(i)
+            ed   (i,k)  = ed   (i,k)*mb(i)
+            cmeg (i,k)  = cmeg (i,k)*mb(i)
+            rprdg(i,k)  = rprdg(i,k)*mb(i)
+            cug  (i,k)  = cug  (i,k)*mb(i)
+            evpg (i,k)  = evpg (i,k)*mb(i)
+         end do
       end do
-   end if
-
-   do k=msg+1,pver
-      do i=1,lengath
-         mu   (i,k)  = mu   (i,k)*mb(i)
-         md   (i,k)  = md   (i,k)*mb(i)
-         mc   (i,k)  = mc   (i,k)*mb(i)
-         du   (i,k)  = du   (i,k)*mb(i)
-         eu   (i,k)  = eu   (i,k)*mb(i)
-         ed   (i,k)  = ed   (i,k)*mb(i)
-         cmeg (i,k)  = cmeg (i,k)*mb(i)
-         rprdg(i,k)  = rprdg(i,k)*mb(i)
-         cug  (i,k)  = cug  (i,k)*mb(i)
-         evpg (i,k)  = evpg (i,k)*mb(i)
-
-      end do
-   end do
 !
 ! compute temperature and moisture changes due to convection.
 !
-   call q1q2_pjr(ncol   ,pver    ,latice  , &
-                 dqdt    ,dsdt    ,qg      ,qs      ,qu      , &
-                 su      ,du      ,qhat    ,shat    ,dp      , &
-                 mu      ,md      ,sd      ,qd      ,qldeg   , &
-                 dsubcld ,jt      ,maxg    ,1       ,lengath , &
-                 cpres   ,rl      ,msg     ,          &
-                 dlg     ,evpg    ,cug)
-
+      call q1q2_pjr(ncol   ,pver    ,latice  , &
+                    dqdt    ,dsdt    ,qg      ,qs      ,qu      , &
+                    su      ,du      ,qhat    ,shat    ,dp      , &
+                    mu      ,md      ,sd      ,qd      ,qldeg   , &
+                    dsubcld ,jt      ,maxg    ,1       ,lengath , &
+                    cpres   ,rl      ,msg     ,          &
+                    dlg     ,evpg    ,cug)
 !
 ! gather back temperature and mixing ratio.
+! (ideep holds distinct columns, so the scatter has no conflicts.)
 !
-
-   do k = msg + 1,pver
-      do i = 1,lengath
+      !$acc parallel loop collapse(2) default(present)
+      do k = msg + 1,pver
+         do i = 1,lengath
 !
 ! q is updated to compute net precip.
 !
-         q(ideep(i),k) = qh(ideep(i),k) + delt*dqdt(i,k)
-         qtnd(ideep(i),k) = dqdt (i,k)
-         cme (ideep(i),k) = cmeg (i,k)
-         rprd(ideep(i),k) = rprdg(i,k)
-         zdu (ideep(i),k) = du   (i,k)
-         mcon(ideep(i),k) = mc   (i,k)
-         heat(ideep(i),k) = dsdt (i,k)*cpres
-         dlf (ideep(i),k) = dlg  (i,k)
-         ql  (ideep(i),k) = qlg  (i,k)
+            q(ideep(i),k) = qh(ideep(i),k) + delt*dqdt(i,k)
+            qtnd(ideep(i),k) = dqdt (i,k)
+            cme (ideep(i),k) = cmeg (i,k)
+            rprd(ideep(i),k) = rprdg(i,k)
+            zdu (ideep(i),k) = du   (i,k)
+            mcon(ideep(i),k) = mc   (i,k)
+            heat(ideep(i),k) = dsdt (i,k)*cpres
+            dlf (ideep(i),k) = dlg  (i,k)
+            ql  (ideep(i),k) = qlg  (i,k)
+         end do
       end do
-   end do
-
+!
 ! Compute precip by integrating change in water vapor minus detrained cloud water
-   do k = pver,msg + 1,-1
-      do i = 1,ncol
-          prec(i) = prec(i) - dpp(i,k)* (q(i,k)-qh(i,k)) - dpp(i,k)*dlf(i,k)*delt
-      end do
-   end do
-
 ! obtain final precipitation rate in m/s.
-   do i = 1,ncol
-      prec(i) = rgrav*max(prec(i),0._kind_phys)/ delt/1000._kind_phys
-   end do
-
 ! Compute reserved liquid (not yet in cldliq) for energy integrals.
 ! Treat rliq as flux out bottom, to be added back later.
-   do k = 1, pver
-      do i = 1, ncol
-          rliq(i) = rliq(i) + dlf(i,k)*dpp(i,k)/gravit
+!
+      !$acc parallel loop default(present)
+      do i = 1,ncol
+         !$acc loop seq
+         do k = pver,msg + 1,-1
+             prec(i) = prec(i) - dpp(i,k)* (q(i,k)-qh(i,k)) - dpp(i,k)*dlf(i,k)*delt
+         end do
+         prec(i) = rgrav*max(prec(i),0._kind_phys)/ delt/1000._kind_phys
+         !$acc loop seq
+         do k = 1, pver
+             rliq(i) = rliq(i) + dlf(i,k)*dpp(i,k)/gravit
+         end do
+         rliq(i) = rliq(i) /1000._kind_phys  ! Converted to precip units m s-1
       end do
-   end do
-   rliq(:ncol) = rliq(:ncol) /1000._kind_phys  ! Converted to precip units m s-1
 
 ! Convert mass flux from reported mb s-1 to kg m-2 s-1
-   mcon(:ncol,:pverp) = mcon(:ncol,:pverp) * 100._kind_phys / gravit
+      !$acc parallel loop collapse(2) default(present)
+      do k = 1,pverp
+         do i = 1,ncol
+            mcon(i,k) = mcon(i,k) * 100._kind_phys / gravit
+         end do
+      end do
+   end if
+
+   !$acc end data
 
    return
 end subroutine zm_convr_run
@@ -916,6 +950,14 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
 !
 !-----------------------------------------------------------------------
 !
+! OpenACC: the arguments are present on the device (zm_convr_run's data region).
+! Loops that carry a value down a column run one column per thread, levels in order.
+!
+   !$acc data create(capeten, tv, tpv, buoy, pl, hmax, hmn, plge600, knt, lelten, &
+   !$acc             hmn_lev, dp_lev, hmn_zdp, q_zdp, parcel_dz, parcel_ztop, parcel_dp, &
+   !$acc             parcel_hdp, parcel_qdp, pbl_dz, ql, hpar, qpar)
+
+   !$acc parallel loop collapse(2) default(present)
    do n = 1,5
       do i = 1,ncol
          lelten(i,n) = pver
@@ -923,6 +965,7 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
       end do
    end do
 !
+   !$acc parallel loop default(present)
    do i = 1,ncol
       lon(i) = pver
       knt(i) = 0
@@ -940,17 +983,19 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
       qpar(i) = 0._kind_phys
    end do
 
-   tp(:ncol,:) = t(:ncol,:)
-   qstp(:ncol,:) = q(:ncol,:)
-   hmn_lev(:ncol,:) = 0._kind_phys
-
-
-
 !!! Initialize tv and buoy for output.
 !!! tv=tv : tpv=tpv : qstp=q : buoy=0.
-   tv(:ncol,:) = t(:ncol,:) *(1._kind_phys+1.608_kind_phys*q(:ncol,:))/ (1._kind_phys+q(:ncol,:))
-   tpv(:ncol,:) = tv(:ncol,:)
-   buoy(:ncol,:) = 0._kind_phys
+   !$acc parallel loop collapse(2) default(present)
+   do k = 1,pver
+      do i = 1,ncol
+         tp(i,k) = t(i,k)
+         qstp(i,k) = q(i,k)
+         hmn_lev(i,k) = 0._kind_phys
+         tv(i,k) = t(i,k) *(1._kind_phys+1.608_kind_phys*q(i,k))/ (1._kind_phys+q(i,k))
+         tpv(i,k) = tv(i,k)
+         buoy(i,k) = 0._kind_phys
+      end do
+   end do
 
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -964,15 +1009,22 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
 if (lparcel_pbl) then
 
 ! Vertical profile of MSE and pressure weighted of the same.
-   hmn_lev(:ncol,1:pver) = cp*t(:ncol,1:pver) + grav*z(:ncol,1:pver) + rl*q(:ncol,1:pver)
-   dp_lev(:ncol,1:pver) = pf(:ncol,2:pver+1)-pf(:ncol,1:pver)
-   hmn_zdp(:ncol,1:pver) = hmn_lev(:ncol,1:pver)*dp_lev(:ncol,1:pver)
-   q_zdp(:ncol,1:pver) = q(:ncol,1:pver)*dp_lev(:ncol,1:pver)
+   !$acc parallel loop collapse(2) default(present)
+   do k = 1,pver
+      do i = 1,ncol
+         hmn_lev(i,k) = cp*t(i,k) + grav*z(i,k) + rl*q(i,k)
+         dp_lev(i,k) = pf(i,k+1)-pf(i,k)
+         hmn_zdp(i,k) = hmn_lev(i,k)*dp_lev(i,k)
+         q_zdp(i,k) = q(i,k)*dp_lev(i,k)
+      end do
+   end do
 
 
 ! Mix profile over vertical length scale of 0.5*PBLH.
 
+   !$acc parallel loop default(present) private(ipar, dp_zfrac)
    do i = 1,ncol ! Loop columns
+      !$acc loop seq
       do k = pver,msg + 1,-1
 
          if (zi(i,k+1)<= parcel_dz(i)) then ! Has to be relative to near-surface layer center elevation
@@ -1001,8 +1053,10 @@ else ! Default method finding level of MSE maximum (nlev sensitive though)
     ! set "launching" level(mx) to be at maximum moist static energy.
     ! search for this level stops at planetary boundary layer top.
     !
-    do k = pver,msg + 1,-1
-       do i = 1,ncol
+    !$acc parallel loop default(present)
+    do i = 1,ncol
+       !$acc loop seq
+       do k = pver,msg + 1,-1
           hmn(i) = cp*t(i,k) + grav*z(i,k) + rl*q(i,k)
           if (k >= nint(pblt(i)) .and. k <= lon(i) .and. hmn(i) > hmax(i)) then
              hmax(i) = hmn(i)
@@ -1027,6 +1081,7 @@ if (lparcel_pbl) then
 ! For parcel dilute need to invert hpar and qpar.
 ! Now need to supply ql(i) as it is mixed parcel version, just q(i,max(i)) in default
 
+   !$acc parallel loop default(present)
    do i = 1,ncol             ! Initialise LCL variables.
       lcl(i) = mx(i)
       tl(i) = (hpar(i)-rl*qpar(i)-grav*parcel_ztop(i))/cp
@@ -1036,6 +1091,7 @@ if (lparcel_pbl) then
 
 else
 
+   !$acc parallel loop default(present)
    do i = 1,ncol
       lcl(i) = mx(i)
       tl(i) = t(i,mx(i))
@@ -1063,6 +1119,7 @@ end if ! Mixed parcel properties
 ! no deep convection is permitted (ensuing calculations
 ! skipped and cape retains initialized value of zero).
 !
+   !$acc parallel loop default(present)
    do i = 1,ncol
       plge600(i) = pl(i).ge.600._kind_phys ! Just change to always allow buoy calculation.
    end do
@@ -1070,6 +1127,7 @@ end if ! Mixed parcel properties
 !
 ! Main buoyancy calculation.
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = pver,msg + 1,-1
       do i=1,ncol
          if (k <= mx(i) .and. plge600(i)) then   ! Define buoy from launch level to cloud top.
@@ -1084,16 +1142,11 @@ end if ! Mixed parcel properties
    end do
 
 
-
-!-------------------------------------------------------------------------------
-
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-
 !
-   do k = msg + 2,pver
-      do i = 1,ncol
+   !$acc parallel loop default(present)
+   do i = 1,ncol
+      !$acc loop seq
+      do k = msg + 2,pver
          if (k < lcl(i) .and. plge600(i)) then
             if (buoy(i,k+1) > 0._kind_phys .and. buoy(i,k) <= 0._kind_phys) then
                knt(i) = min(num_cin,knt(i) + 1)
@@ -1105,9 +1158,11 @@ end if ! Mixed parcel properties
 !
 ! calculate convective available potential energy (cape).
 !
+   !$acc parallel loop collapse(2) default(present)
    do n = 1,num_cin
-      do k = msg + 1,pver
-         do i = 1,ncol
+      do i = 1,ncol
+         !$acc loop seq
+         do k = msg + 1,pver
             if (plge600(i) .and. k <= mx(i) .and. k > lelten(i,n)) then
                capeten(i,n) = capeten(i,n) + rd*buoy(i,k)*log(pf(i,k+1)/pf(i,k))
             end if
@@ -1118,21 +1173,21 @@ end if ! Mixed parcel properties
 ! find maximum cape from all possible tentative capes from
 ! one sounding,
 ! and use it as the final cape, april 26, 1995
+! put lower bound on cape for diagnostic purposes.
 !
-   do n = 1,num_cin
-      do i = 1,ncol
+   !$acc parallel loop default(present)
+   do i = 1,ncol
+      !$acc loop seq
+      do n = 1,num_cin
          if (capeten(i,n) > cape(i)) then
             cape(i) = capeten(i,n)
             lel(i) = lelten(i,n)
          end if
       end do
-   end do
-!
-! put lower bound on cape for diagnostic purposes.
-!
-   do i = 1,ncol
       cape(i) = max(cape(i), 0._kind_phys)
    end do
+
+   !$acc end data
 !
    return
 end subroutine buoyan_dilute
@@ -1230,6 +1285,13 @@ integer rcall       ! Number of ientropy call for errors recording
 integer nit_lheat     ! Number of iterations for condensation/freezing loop.
 integer i,k,ii   ! Loop counters.
 
+! First non-converged ientropy call in each column (fail_rcall = 0: none), and its
+! inputs and result, for the error message
+logical converged
+integer nfail
+integer fail_rcall(ncol)
+real(kind_phys) fail_p(ncol), fail_tfg(ncol), fail_qt(ncol), fail_qst(ncol), fail_s(ncol)
+
 !======================================================================
 !    SUMMARY
 !
@@ -1248,29 +1310,42 @@ dmpdz=dmpdz_param       ! Entrainment rate. (-ve for /m)
 lwmax = 1.e-3_kind_phys    ! Need to put formula in for this.
 tscool = 0.0_kind_phys   ! Temp at which water loading freezes in the cloud.
 
-qtmix=0._kind_phys
-smix=0._kind_phys
+! OpenACC: the arguments are present on the device (zm_convr_run's data region).
+! The level loops carry the parcel up each column: one column per thread, levels
+! in order; the scalars below are per column (private).
+!$acc data create(tmix, qtmix, qsmix, smix, xsh2o, ds_xsh2o, ds_freeze, mp, qtp, sp, &
+!$acc             sp0, qtp0, mp0, fail_rcall, fail_p, fail_tfg, fail_qt, fail_qst, fail_s)
 
-qtenv = 0._kind_phys
-senv = 0._kind_phys
-tenv = 0._kind_phys
-penv = 0._kind_phys
+!$acc parallel loop collapse(2) default(present)
+do k = 1, pver
+   do i = 1, ncol
+      qtmix(i,k) = 0._kind_phys
+      smix(i,k) = 0._kind_phys
+      xsh2o(i,k) = 0._kind_phys
+      ds_xsh2o(i,k) = 0._kind_phys
+      ds_freeze(i,k) = 0._kind_phys
+   end do
+end do
 
-qtp0 = 0._kind_phys
-sp0  = 0._kind_phys
-mp0 = 0._kind_phys
-
-qtp = 0._kind_phys
-sp = 0._kind_phys
-mp = 0._kind_phys
-
-new_q = 0._kind_phys
-new_s = 0._kind_phys
+!$acc parallel loop default(present)
+do i = 1, ncol
+   qtp0(i) = 0._kind_phys
+   sp0(i)  = 0._kind_phys
+   mp0(i) = 0._kind_phys
+   qtp(i) = 0._kind_phys
+   sp(i) = 0._kind_phys
+   mp(i) = 0._kind_phys
+   fail_rcall(i) = 0
+end do
 
 ! **** Begin loops ****
 
-do k = pver, msg+1, -1
-   do i=1,ncol
+!$acc parallel loop default(present) &
+!$acc private(dp, qtenv, tenv, penv, senv, dpdz, dzdp, dmpdp, tfguess, rcall, converged, &
+!$acc         qxsk, qxskp1, dqxsdp, dsdp, dqtdp, slcl, qtlcl, qslcl)
+do i=1,ncol
+   !$acc loop seq
+   do k = pver, msg+1, -1
 
 ! Initialize parcel values at launch level.
 
@@ -1293,8 +1368,15 @@ do k = pver, msg+1, -1
          qtmix(i,k) = qtp0(i)
          tfguess = t(i,k)
          rcall = 1
-         call ientropy (rcall,i,smix(i,k),p(i,k),qtmix(i,k),tmix(i,k),qsmix(i,k),tfguess,cpliq,cpwv,rh2o,&
-                        lat(i), long(i), errmsg,errflg)
+         call ientropy (smix(i,k),p(i,k),qtmix(i,k),tmix(i,k),qsmix(i,k),tfguess,cpliq,cpwv,rh2o,converged)
+         if (.not. converged .and. fail_rcall(i) == 0) then
+            fail_rcall(i) = rcall
+            fail_p(i) = p(i,k)
+            fail_tfg(i) = tfguess
+            fail_qt(i) = qtmix(i,k)
+            fail_qst(i) = qsmix(i,k)
+            fail_s(i) = smix(i,k)
+         end if
       end if
 
 ! Entraining levels
@@ -1334,8 +1416,15 @@ do k = pver, msg+1, -1
 
          tfguess = tmix(i,k+1)
          rcall = 2
-         call ientropy(rcall,i,smix(i,k),p(i,k),qtmix(i,k),tmix(i,k),qsmix(i,k),tfguess,cpliq,cpwv,rh2o,lat(i),&
-                       long(i),errmsg,errflg)
+         call ientropy(smix(i,k),p(i,k),qtmix(i,k),tmix(i,k),qsmix(i,k),tfguess,cpliq,cpwv,rh2o,converged)
+         if (.not. converged .and. fail_rcall(i) == 0) then
+            fail_rcall(i) = rcall
+            fail_p(i) = p(i,k)
+            fail_tfg(i) = tfguess
+            fail_qt(i) = qtmix(i,k)
+            fail_qst(i) = qsmix(i,k)
+            fail_s(i) = smix(i,k)
+         end if
 
 !
 ! Determine if this is lcl of this column if qsmix <= qtmix.
@@ -1354,7 +1443,15 @@ do k = pver, msg+1, -1
 
             tfguess = tmix(i,k)
             rcall = 3
-            call ientropy (rcall,i,slcl,pl(i),qtlcl,tl(i),qslcl,tfguess,cpliq,cpwv,rh2o,lat(i), long(i), errmsg,errflg)
+            call ientropy (slcl,pl(i),qtlcl,tl(i),qslcl,tfguess,cpliq,cpwv,rh2o,converged)
+            if (.not. converged .and. fail_rcall(i) == 0) then
+               fail_rcall(i) = rcall
+               fail_p(i) = pl(i)
+               fail_tfg(i) = tfguess
+               fail_qt(i) = qtlcl
+               fail_qst(i) = qslcl
+               fail_s(i) = slcl
+            end if
 
          endif
 !
@@ -1380,17 +1477,17 @@ end do ! Columns loop
 !! to it. But does this also increase qsmix as well? Also freezing processes
 
 
-xsh2o = 0._kind_phys
-ds_xsh2o = 0._kind_phys
-ds_freeze = 0._kind_phys
+! (xsh2o, ds_xsh2o and ds_freeze are zeroed above.)
 
 !!!!!!!!!!!!!!!!!!!!!!!!!PRECIPITATION/FREEZING LOOP!!!!!!!!!!!!!!!!!!!!!!!!!!
 !! Iterate solution twice for accuracy
 
 
 
-do k = pver, msg+1, -1
-   do i=1,ncol
+!$acc parallel loop default(present) private(ii, new_s, new_q, tfguess, rcall, converged)
+do i=1,ncol
+   !$acc loop seq
+   do k = pver, msg+1, -1
 
 ! Initialize variables at k=klaunch
 
@@ -1410,6 +1507,7 @@ do k = pver, msg+1, -1
 
 ! Iterate nit_lheat times for s,qt changes.
 
+         !$acc loop seq
          do ii=0,nit_lheat-1
 
 ! Rain (xsh2o) is excess condensate, bar LWMAX (Accumulated loss from qtmix).
@@ -1443,8 +1541,15 @@ do k = pver, msg+1, -1
 
             tfguess = tmix(i,k)
             rcall =4
-            call ientropy (rcall,i,new_s, p(i,k), new_q, tmix(i,k), qsmix(i,k), tfguess,cpliq,cpwv,rh2o,&
-                           lat(i), long(i), errmsg,errflg)
+            call ientropy (new_s, p(i,k), new_q, tmix(i,k), qsmix(i,k), tfguess,cpliq,cpwv,rh2o,converged)
+            if (.not. converged .and. fail_rcall(i) == 0) then
+               fail_rcall(i) = rcall
+               fail_p(i) = p(i,k)
+               fail_tfg(i) = tfguess
+               fail_qt(i) = new_q
+               fail_qst(i) = qsmix(i,k)
+               fail_s(i) = new_s
+            end if
 
          end do  ! Iteration loop for freezing processes.
 
@@ -1465,10 +1570,33 @@ do k = pver, msg+1, -1
 
       end if ! k < klaunch
 
-   end do ! Loop for columns
+   end do  ! Loop for vertical levels.
 
-end do  ! Loop for vertical levels.
+end do ! Loop for columns
 
+! Report the first column with a non-converged entropy inversion (on the host)
+nfail = 0
+!$acc parallel loop default(present) reduction(+:nfail)
+do i = 1, ncol
+   if (fail_rcall(i) /= 0) nfail = nfail + 1
+end do
+if (nfail > 0) then
+   !$acc update self(fail_rcall, fail_p, fail_tfg, fail_qt, fail_qst, fail_s)
+   do i = 1, ncol
+      if (fail_rcall(i) /= 0) then
+         write(errmsg,100) '  ZM_CONV: IENTROPY. Details: call#,icol= ',fail_rcall(i),i, &
+              ' lat: ',lat(i),' lon: ',long(i), &
+              ' P(mb)= ', fail_p(i), ' Tfg(K)= ', fail_tfg(i), ' qt(g/kg) = ', 1000._kind_phys*fail_qt(i), &
+              ' qst(g/kg) = ', 1000._kind_phys*fail_qst(i),', s(J/kg) = ',fail_s(i)
+         errflg = 1
+         exit
+      end if
+   end do
+end if
+
+!$acc end data
+
+100 format (A,I4,I4,7(A,F6.2))
 
 return
 end subroutine parcel_dilute
@@ -1480,6 +1608,7 @@ real(kind_phys) function entropy(TK,p,qtot,cpliq,cpwv,rh2o)
 ! TK(K),p(mb),qtot(kg/kg)
 ! from Raymond and Blyth 1992
 !
+     !$acc routine seq
      real(kind_phys), intent(in) :: p,qtot,TK
      real(kind_phys), intent(in) :: cpliq
      real(kind_phys), intent(in) :: cpwv
@@ -1502,32 +1631,28 @@ end FUNCTION entropy
 
 !
 !-----------------------------------------------------------------------------------------
-SUBROUTINE ientropy (rcall,icol,s,p,qt,T,qst,Tfg,cpliq,cpwv,rh2o,this_lat,this_lon,errmsg,errflg)
+SUBROUTINE ientropy (s,p,qt,T,qst,Tfg,cpliq,cpwv,rh2o,converged)
 !-----------------------------------------------------------------------------------------
 !
 ! p(mb), Tfg/T(K), qt/qv(kg/kg), s(J/kg).
 ! Inverts entropy, pressure and total water qt
 ! for T and saturated vapor mixing ratio
+! converged is .false. when the iteration did not converge; the caller reports it
+! (ientropy runs on the GPU, where it cannot write the message).
 !
+  !$acc routine seq
 
-  integer, intent(in) :: icol, rcall
   real(kind_phys), intent(in)  :: s, p, Tfg, qt
   real(kind_phys), intent(in) :: cpliq
   real(kind_phys), intent(in) :: cpwv
   real(kind_phys), intent(in) :: rh2o
 
-  real(kind_phys), intent(in) :: this_lat
-  real(kind_phys), intent(in) :: this_lon
-
   real(kind_phys), intent(out) :: qst, T
-  character(len=512), intent(out)      :: errmsg
-  integer, intent(out)                 :: errflg
+  logical, intent(out) :: converged
 
   real(kind_phys) :: est
   real(kind_phys) :: a,b,c,d,ebr,fa,fb,fc,pbr,qbr,rbr,sbr,tol1,xm,tol
   integer :: i
-
-  logical :: converged
 
   ! Max number of iteration loops.
   integer, parameter :: LOOPMAX = 100
@@ -1606,16 +1731,6 @@ SUBROUTINE ientropy (rcall,icol,s,p,qt,T,qst,Tfg,cpliq,cpwv,rh2o,this_lat,this_l
 
   T = b
   call qsat_hPa(T, p, est, qst)
-
-  if (.not. converged) then
-      write(errmsg,100) '  ZM_CONV: IENTROPY. Details: call#,icol= ',rcall,icol, &
-           ' lat: ',this_lat,' lon: ',this_lon, &
-           ' P(mb)= ', p, ' Tfg(K)= ', Tfg, ' qt(g/kg) = ', 1000._kind_phys*qt, &
-           ' qst(g/kg) = ', 1000._kind_phys*qst,', s(J/kg) = ',s
-     errflg=1
-  end if
-
-100 format (A,I4,I4,7(A,F6.2))
 
 end SUBROUTINE ientropy
 
@@ -1757,7 +1872,6 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 
    integer khighest
    integer klowest
-   integer kount
    integer i,k
 
    logical doit(ncol)
@@ -1766,6 +1880,15 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !------------------------------------------------------------------------------
 !
 
+   ! OpenACC: the arguments are present on the device (zm_convr_run's data region).
+   ! Loops that carry a value down a column, or use a per-column temporary, run one
+   ! column per thread with levels in the original order.
+   !$acc data create(gamma, dz, iprm, hu, hd, eps, f, k1, i2, ihat, i3, idag, i4) &
+   !$acc      create(qsthat, hsthat, gamhat, qds, c0mask, hmin, expdif, expnum, ftemp) &
+   !$acc      create(eps0, rmue, zuef, zdef, epsm, ratmjb, est, totpcp, totevp, alfa) &
+   !$acc      create(totfrz, frz, tmplel, doit, done)
+
+   !$acc parallel loop default(present)
    do i = 1,il2g
       ftemp(i) = 0._kind_phys
       expnum(i) = 0._kind_phys
@@ -1775,6 +1898,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !
 !jr Change from msg+1 to 1 to prevent blowup
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = 1,pver
       do i = 1,il2g
          dz(i,k) = zf(i,k) - zf(i,k+1)
@@ -1784,8 +1908,10 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !
 ! initialize many output and work variables to zero
 !
-   do k = 1,pver
-      do i = 1,il2g
+   !$acc parallel loop default(present)
+   do i = 1,il2g
+      !$acc loop seq
+      do k = 1,pver
          k1(i,k) = 0._kind_phys
          i2(i,k) = 0._kind_phys
          i3(i,k) = 0._kind_phys
@@ -1829,6 +1955,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !
 !jr Set to zero things which make this routine blow up
 !
+   !$acc parallel loop collapse(2) default(present)
    do k=1,msg
       do i=1,il2g
          rprd(i,k) = 0._kind_phys
@@ -1838,6 +1965,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 ! interpolate the layer values of qst, hsat and gamma to
 ! layer interfaces
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = 1, msg+1
       do i = 1,il2g
          hsthat(i,k) = hsat(i,k)
@@ -1845,10 +1973,12 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          gamhat(i,k) = gamma(i,k)
       end do
    end do
+   !$acc parallel loop default(present)
    do i = 1,il2g
       totpcp(i) = 0._kind_phys
       totevp(i) = 0._kind_phys
    end do
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 2,pver
       do i = 1,il2g
          if (abs(qst(i,k-1)-qst(i,k)) > 1.E-6_kind_phys) then
@@ -1869,7 +1999,11 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 ! initialize cloud top to highest plume top.
 !jr changed hard-wired 4 to limcnv+1 (not to exceed pver)
 !
-   jt(:) = pver
+   !$acc parallel loop default(present)
+   do i = 1,ncol
+      jt(i) = pver
+   end do
+   !$acc parallel loop default(present)
    do i = 1,il2g
       jt(i) = max(lel(i),limcnv+1)
       jt(i) = min(jt(i),pver)
@@ -1881,14 +2015,17 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 ! find the level of minimum hsat, where detrainment starts
 !
 
-   do k = msg + 1,pver
-      do i = 1,il2g
+   !$acc parallel loop default(present)
+   do i = 1,il2g
+      !$acc loop seq
+      do k = msg + 1,pver
          if (hsat(i,k) <= hmin(i) .and. k >= jt(i) .and. k <= jb(i)) then
             hmin(i) = hsat(i,k)
             j0(i) = k
          end if
       end do
    end do
+   !$acc parallel loop default(present)
    do i = 1,il2g
       j0(i) = min(j0(i),jb(i)-2)
       j0(i) = max(j0(i),jt(i)+2)
@@ -1900,6 +2037,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !
 ! Initialize certain arrays inside cloud
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 1,pver
       do i = 1,il2g
          if (k >= jt(i) .and. k <= jb(i)) then
@@ -1913,8 +2051,10 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 ! compute taylor series for approximate eps(z) below
 ! *********************************************************
 !
-   do k = pver - 1,msg + 1,-1
-      do i = 1,il2g
+   !$acc parallel loop default(present)
+   do i = 1,il2g
+      !$acc loop seq
+      do k = pver - 1,msg + 1,-1
          if (k < jb(i) .and. k >= jt(i)) then
             k1(i,k) = k1(i,k+1) + (hmn(i,mx(i))-hmn(i,k))*dz(i,k)
             ihat(i,k) = 0.5_kind_phys* (k1(i,k+1)+k1(i,k))
@@ -1929,11 +2069,14 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !
 ! re-initialize hmin array for ensuing calculation.
 !
+   !$acc parallel loop default(present)
    do i = 1,il2g
       hmin(i) = 1.E6_kind_phys
    end do
-   do k = msg + 1,pver
-      do i = 1,il2g
+   !$acc parallel loop default(present)
+   do i = 1,il2g
+      !$acc loop seq
+      do k = msg + 1,pver
          if (k >= j0(i) .and. k <= jb(i) .and. hmn(i,k) <= hmin(i)) then
             hmin(i) = hmn(i,k)
             expdif(i) = hmn(i,mx(i)) - hmin(i)
@@ -1945,8 +2088,10 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 ! compute approximate eps(z) using above taylor series
 ! *********************************************************
 !
-   do k = msg + 2,pver
-      do i = 1,il2g
+   !$acc parallel loop default(present)
+   do i = 1,il2g
+      !$acc loop seq
+      do k = msg + 2,pver
          expnum(i) = 0._kind_phys
          ftemp(i) = 0._kind_phys
          if (k < jt(i) .or. k >= jb(i)) then
@@ -1969,18 +2114,22 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          end if
       end do
    end do
+   !$acc parallel loop default(present)
    do i = 1,il2g
       if (j0(i) < jb(i)) then
          if (f(i,j0(i)) < 1.E-6_kind_phys .and. f(i,j0(i)+1) > f(i,j0(i))) j0(i) = j0(i) + 1
       end if
    end do
-   do k = msg + 2,pver
-      do i = 1,il2g
+   !$acc parallel loop default(present)
+   do i = 1,il2g
+      !$acc loop seq
+      do k = msg + 2,pver
          if (k >= jt(i) .and. k <= j0(i)) then
             f(i,k) = max(f(i,k),f(i,k-1))
          end if
       end do
    end do
+   !$acc parallel loop default(present)
    do i = 1,il2g
       eps0(i) = f(i,j0(i))
       eps(i,jb(i)) = eps0(i)
@@ -1988,6 +2137,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !
 ! This is set to match the Rasch and Kristjansson paper
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = pver,msg + 1,-1
       do i = 1,il2g
          if (k >= j0(i) .and. k <= jb(i)) then
@@ -1995,6 +2145,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          end if
       end do
    end do
+   !$acc parallel loop collapse(2) default(present)
    do k = pver,msg + 1,-1
       do i = 1,il2g
          if (k < j0(i) .and. k >= jt(i)) eps(i,k) = f(i,k)
@@ -2009,6 +2160,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 ! and moist static energy hu.
 ! here and below mu, eu,du, md and ed are all normalized by mb
 !
+      !$acc parallel loop default(present)
       do i = 1,il2g
          if (eps0(i) > 0._kind_phys) then
             mu(i,jb(i)) = 1._kind_phys
@@ -2017,8 +2169,10 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 
          tmplel(i) = jt(i)
       end do
-      do k = pver,msg + 1,-1
-         do i = 1,il2g
+      !$acc parallel loop default(present)
+      do i = 1,il2g
+         !$acc loop seq
+         do k = pver,msg + 1,-1
             if (eps0(i) > 0._kind_phys .and. (k >= tmplel(i) .and. k < jb(i))) then
                zuef(i) = zf(i,k) - zf(i,jb(i))
                rmue(i) = (1._kind_phys/eps0(i))* (exp(eps(i,k+1)*zuef(i))-1._kind_phys)/zuef(i)
@@ -2031,12 +2185,15 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 
       khighest = pverp
       klowest = 1
+      !$acc parallel loop default(present) reduction(min:khighest) reduction(max:klowest)
       do i=1,il2g
          khighest = min(khighest,lel(i))
          klowest = max(klowest,jb(i))
       end do
-      do k = klowest-1,khighest,-1
-         do i = 1,il2g
+      !$acc parallel loop default(present)
+      do i = 1,il2g
+         !$acc loop seq
+         do k = klowest-1,khighest,-1
             if (k <= jb(i)-1 .and. k >= lel(i) .and. eps0(i) > 0._kind_phys) then
                if (mu(i,k) < 0.02_kind_phys) then
                   hu(i,k) = hmn(i,k)
@@ -2054,15 +2211,19 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 ! reset cloud top index beginning from two layers above the
 ! cloud base (i.e. if cloud is only one layer thick, top is not reset
 !
+      !$acc parallel loop default(present)
       do i=1,il2g
          doit(i) = .true.
          totfrz(i)= 0._kind_phys
+         !$acc loop seq
          do k = pver,msg + 1,-1
             totfrz(i)= totfrz(i)+ frz(i,k)*dz(i,k)
          end do
       end do
-      do k=klowest-2,khighest-1,-1
-         do i=1,il2g
+      !$acc parallel loop default(present)
+      do i=1,il2g
+         !$acc loop seq
+         do k=klowest-2,khighest-1,-1
             if (doit(i) .and. k <= jb(i)-2 .and. k >= lel(i)-1) then
                if (hu(i,k) <= hsthat(i,k) .and. hu(i,k+1) > hsthat(i,k+1) &
                   .and. mu(i,k) >= 0.02_kind_phys) then
@@ -2081,8 +2242,10 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          end do
       end do
 
-      do k = pver,msg + 1,-1
-         do i = 1,il2g
+      !$acc parallel loop default(present)
+      do i = 1,il2g
+         !$acc loop seq
+         do k = pver,msg + 1,-1
             if (k >= lel(i) .and. k <= jt(i) .and. eps0(i) > 0._kind_phys) then
                mu(i,k) = 0._kind_phys
                eu(i,k) = 0._kind_phys
@@ -2097,12 +2260,14 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          end do
       end do
 
+      !$acc parallel loop default(present)
       do i = 1,il2g
          done(i) = .false.
       end do
-      kount = 0
-      do k = pver,msg + 2,-1
-         do i = 1,il2g
+      !$acc parallel loop default(present) private(tu, estu, qstu)
+      do i = 1,il2g
+         !$acc loop seq
+         do k = pver,msg + 2,-1
             if (k == jb(i) .and. eps0(i) > 0._kind_phys) then
                qu(i,k) = q(i,mx(i))
                su(i,k) = (hu(i,k)-rl*qu(i,k))/cp
@@ -2116,14 +2281,12 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
                call qsat_hPa(tu, (p(i,k)+p(i,k-1))/2._kind_phys, estu, qstu)
                if (qu(i,k) >= qstu) then
                   jlcl(i) = k
-                  kount = kount + 1
                   done(i) = .true.
                end if
             end if
          end do
-         if (kount >= il2g) goto 690
       end do
-690   continue
+      !$acc parallel loop collapse(2) default(present)
       do k = msg + 2,pver
          do i = 1,il2g
             if ((k > jt(i) .and. k <= jlcl(i)) .and. eps0(i) > 0._kind_phys) then
@@ -2135,8 +2298,12 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
       end do
 
 ! compute condensation in updraft
-      tmplel(:il2g) = jb(:il2g)
+      !$acc parallel loop default(present)
+      do i = 1,il2g
+         tmplel(i) = jb(i)
+      end do
 
+      !$acc parallel loop collapse(2) default(present)
       do k = pver,msg + 2,-1
          do i = 1,il2g
              if (k >= jt(i) .and. k < tmplel(i) .and. eps0(i) > 0._kind_phys) then
@@ -2158,8 +2325,10 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !    mu, ql are interface quantities
 !    cu, du, eu, rprd are midpoint quantites
 
-         do k = pver,msg + 2,-1
-            do i = 1,il2g
+         !$acc parallel loop default(present) private(ql1)
+         do i = 1,il2g
+            !$acc loop seq
+            do k = pver,msg + 2,-1
                rprd(i,k) = 0._kind_phys
                if (k >= jt(i) .and. k < jb(i) .and. eps0(i) > 0._kind_phys .and. mu(i,k) >= 0.0_kind_phys) then
                   if (mu(i,k) > 0._kind_phys) then
@@ -2184,6 +2353,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 ! scale down downward mass flux profile so that net flux
 ! (up-down) at cloud base in not negative.
 !
+   !$acc parallel loop default(present)
    do i = 1,il2g
 !
 ! in normal downdraft strength run alfa=0.2.  In test4 alfa=0.1
@@ -2198,8 +2368,10 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          md(i,jd(i)) = -alfa(i)*epsm(i)/eps0(i)
       end if
    end do
-   do k = msg + 1,pver
-      do i = 1,il2g
+   !$acc parallel loop default(present)
+   do i = 1,il2g
+      !$acc loop seq
+      do k = msg + 1,pver
          if ((k > jd(i) .and. k <= jb(i)) .and. eps0(i) > 0._kind_phys) then
             zdef(i) = zf(i,jd(i)) - zf(i,k)
             md(i,k) = -alfa(i)/ (2._kind_phys*eps0(i))*(exp(2._kind_phys*epsm(i)*zdef(i))-1._kind_phys)/zdef(i)
@@ -2207,8 +2379,10 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
       end do
    end do
 
-   do k = msg + 1,pver
-      do i = 1,il2g
+   !$acc parallel loop default(present)
+   do i = 1,il2g
+      !$acc loop seq
+      do k = msg + 1,pver
          if ((k >= jt(i) .and. k <= jb(i)) .and. eps0(i) > 0._kind_phys .and. jd(i) < jb(i)) then
             ratmjb(i) = min(abs(mu(i,jb(i))/md(i,jb(i))),1._kind_phys)
             md(i,k) = md(i,k)*ratmjb(i)
@@ -2217,8 +2391,10 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
    end do
 
    small = 1.e-20_kind_phys
-   do k = msg + 1,pver
-      do i = 1,il2g
+   !$acc parallel loop default(present) private(mdt)
+   do i = 1,il2g
+      !$acc loop seq
+      do k = msg + 1,pver
          if ((k >= jt(i) .and. k <= pver) .and. eps0(i) > 0._kind_phys) then
             ed(i,k-1) = (md(i,k-1)-md(i,k))/dz(i,k-1)
             mdt = min(md(i,k),-small)
@@ -2229,6 +2405,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !
 ! calculate updraft and downdraft properties.
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 2,pver
       do i = 1,il2g
          if ((k >= jd(i) .and. k <= jb(i)) .and. eps0(i) > 0._kind_phys .and. jd(i) < jb(i)) then
@@ -2238,13 +2415,16 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
       end do
    end do
 
+   !$acc parallel loop default(present)
    do i = 1,il2g
       qd(i,jd(i)) = qds(i,jd(i))
       sd(i,jd(i)) = (hd(i,jd(i)) - rl*qd(i,jd(i)))/cp
    end do
 !
-   do k = msg + 2,pver
-      do i = 1,il2g
+   !$acc parallel loop default(present) private(mdt)
+   do i = 1,il2g
+      !$acc loop seq
+      do k = msg + 2,pver
          if (k >= jd(i) .and. k < jb(i) .and. eps0(i) > 0._kind_phys) then
             qd(i,k+1) = qds(i,k+1)
             evp(i,k) = -ed(i,k)*q(i,k) + (md(i,k)*qd(i,k)-md(i,k+1)*qd(i,k+1))/dz(i,k)
@@ -2255,6 +2435,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          end if
       end do
    end do
+   !$acc parallel loop default(present)
    do i = 1,il2g
       totevp(i) = totevp(i) + md(i,jd(i))*qd(i,jd(i)) - md(i,jb(i))*qd(i,jb(i))
    end do
@@ -2270,11 +2451,13 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
       end do
    endif
 
+   !$acc parallel loop default(present)
    do i = 1,il2g
       totpcp(i) = max(totpcp(i),0._kind_phys)
       totevp(i) = max(totevp(i),0._kind_phys)
    end do
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 2,pver
       do i = 1,il2g
          if (totevp(i) > 0._kind_phys .and. totpcp(i) > 0._kind_phys) then
@@ -2294,12 +2477,14 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
    end do
 
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 1,pver
       do i = 1,il2g
          mc(i,k) = mu(i,k) + md(i,k)
       end do
    end do
 !
+   !$acc end data
    return
 end subroutine cldprp
 
@@ -2386,6 +2571,11 @@ subroutine closure(ncol   ,pver, &
 ! time derivatives per unit cloud-base mass flux, i.e. they
 ! have units of 1/mb instead of 1/sec.
 !
+   ! OpenACC: the arguments are present on the device (zm_convr_run's data region).
+   !$acc data create(dtpdt, dqsdtp, dtmdt, dqmdt, dboydt, thetavp, thetavm, dtbdt, dqbdt) &
+   !$acc      create(dtldt, dadt)
+
+   !$acc parallel loop default(present) private(eb, debdt)
    do i = il1g,il2g
       mb(i) = 0._kind_phys
       eb = p(i,mx(i))*q(i,mx(i))/ (eps1+q(i,mx(i)))
@@ -2400,6 +2590,7 @@ subroutine closure(ncol   ,pver, &
 !
 !   dtmdt and dqmdt are cumulus heating and drying.
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 1,pver
       do i = il1g,il2g
          dtmdt(i,k) = 0._kind_phys
@@ -2407,6 +2598,7 @@ subroutine closure(ncol   ,pver, &
       end do
    end do
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 1,pver - 1
       do i = il1g,il2g
          if (k == jt(i)) then
@@ -2419,6 +2611,7 @@ subroutine closure(ncol   ,pver, &
    end do
 !
    beta = 0._kind_phys
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 1,pver - 1
       do i = il1g,il2g
          if (k > jt(i) .and. k < mx(i)) then
@@ -2434,6 +2627,7 @@ subroutine closure(ncol   ,pver, &
       end do
    end do
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 1,pver
       do i = il1g,il2g
          if (k >= lel(i) .and. k <= lcl(i)) then
@@ -2457,6 +2651,7 @@ subroutine closure(ncol   ,pver, &
       end do
    end do
 !
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 1,pver
       do i = il1g,il2g
          if (k > lcl(i) .and. k < mx(i)) then
@@ -2475,20 +2670,32 @@ subroutine closure(ncol   ,pver, &
 !
 ! buoyant energy change is set to 2/3*excess cape per 3 hours
 !
-   dadt(il1g:il2g)  = 0._kind_phys
-   kmin = minval(lel(il1g:il2g))
-   kmax = maxval(mx(il1g:il2g)) - 1
-   do k = kmin, kmax
-      do i = il1g,il2g
+   ! kmin, kmax: minval/maxval over the columns (same values as before)
+   kmin = huge(kmin)
+   kmax = -huge(kmax)
+   !$acc parallel loop default(present) reduction(min:kmin) reduction(max:kmax)
+   do i = il1g,il2g
+      dadt(i)  = 0._kind_phys
+      kmin = min(kmin, lel(i))
+      kmax = max(kmax, mx(i))
+   end do
+   kmax = kmax - 1
+   !$acc parallel loop default(present)
+   do i = il1g,il2g
+      !$acc loop seq
+      do k = kmin, kmax
          if ( k >= lel(i) .and. k <= mx(i) - 1) then
             dadt(i) = dadt(i) + dboydt(i,k)* (zf(i,k)-zf(i,k+1))
          endif
       end do
    end do
+   !$acc parallel loop default(present) private(dltaa)
    do i = il1g,il2g
       dltaa = -1._kind_phys* (cape(i)-capelmt)
       if (dadt(i) /= 0._kind_phys) mb(i) = max(dltaa/tau/dadt(i),0._kind_phys)
    end do
+
+   !$acc end data
 !
    return
 end subroutine closure
@@ -2551,6 +2758,8 @@ subroutine q1q2_pjr(ncol   ,pver    ,latice  ,&
    real(kind_phys) emc
    real(kind_phys) rl
 !-------------------------------------------------------------------
+   ! OpenACC: the arguments are present on the device (zm_convr_run's data region).
+   !$acc parallel loop collapse(2) default(present)
    do k = msg + 1,pver
       do i = il1g,il2g
          dsdt(i,k) = 0._kind_phys
@@ -2564,11 +2773,15 @@ subroutine q1q2_pjr(ncol   ,pver    ,latice  ,&
 !
    ktm = pver
    kbm = pver
+   !$acc parallel loop default(present) reduction(min:ktm) reduction(min:kbm)
    do i = il1g, il2g
       ktm = min(ktm,jt(i))
       kbm = min(kbm,mx(i))
    end do
 
+   ! ktm is the highest cloud top over all gathered columns: below their own top,
+   ! columns get tendencies from this loop too, so the bound stays the global one.
+   !$acc parallel loop collapse(2) default(present) private(emc)
    do k = ktm,pver-1
       do i = il1g,il2g
          emc = -cu (i,k)               &         ! condensation in updraft
@@ -2594,8 +2807,10 @@ subroutine q1q2_pjr(ncol   ,pver    ,latice  ,&
    end do
 
 !
-   do k = kbm,pver
-      do i = il1g,il2g
+   !$acc parallel loop default(present)
+   do i = il1g,il2g
+      !$acc loop seq
+      do k = kbm,pver
          if (k == mx(i)) then
             dsdt(i,k) = (1._kind_phys/dsubcld(i))* &
                         (-mu(i,k)* (su(i,k)-shat(i,k)) &
@@ -2621,6 +2836,7 @@ end subroutine q1q2_pjr
 ! Afterward, set es back to hPa.
 subroutine qsat_hPa(t, p, es, qm)
   use wv_saturation, only: qsat_water
+  !$acc routine seq
 
   ! Inputs
   real(kind_phys), intent(in) :: t    ! Temperature (K)
