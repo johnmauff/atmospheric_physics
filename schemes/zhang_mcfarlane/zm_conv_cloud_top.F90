@@ -24,10 +24,17 @@ contains
     errmsg = ''
     errflg = 0
 
-    jctop(:ncol) = pver
+    !$acc data copyin(jt, ideep) copyout(jctop)
+    !$acc parallel loop
+    do i = 1, ncol
+       jctop(i) = pver
+    end do
+    ! ideep holds distinct column indices, so the scatter has no conflicts
+    !$acc parallel loop
     do i = 1, lengath
        jctop(ideep(i)) = jt(i)
     end do
+    !$acc end data
 
   end subroutine zm_conv_cloud_top_run
 
