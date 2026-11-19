@@ -6,6 +6,7 @@ module atmos_phys_rad_utils
 
     public :: is_visible
     public :: stratospheric_trace_gas_profile
+    public :: stratospheric_trace_gas_profile_column
 
 contains
 
@@ -59,22 +60,13 @@ contains
       real(kind_phys), intent(in)  :: pmid(:)            ! air pressure at layer midpoints [Pa]
       real(kind_phys), intent(out) :: q(:)               ! gas mixing ratio profile [kg kg-1]
 
-      ! latitude of the switch between the two decay exponent branches [deg]
-      real(kind_phys), parameter :: exponent_branch_lat = 45._kind_phys
-
-      real(kind_phys) :: abs_lat_degrees ! abs(latitude) [deg]
       real(kind_phys) :: ptrop           ! climatological tropopause pressure [Pa]
       real(kind_phys) :: decay_exponent  ! stratospheric decay exponent [1]
       integer         :: k
 
-      abs_lat_degrees = abs(lat * degrees_per_radian)
-      if (abs_lat_degrees <= exponent_branch_lat) then
-         decay_exponent = exponent_coefs(1) + exponent_coefs(2) * abs_lat_degrees
-      else
-         decay_exponent = exponent_coefs(3) + exponent_coefs(4) * (abs_lat_degrees - exponent_branch_lat)
-      end if
-
-      ptrop = 250.0e2_kind_phys - 150.0e2_kind_phys * cos(lat)**2
+      call trace_gas_profile_params(lat, degrees_per_radian, &
+           exponent_coefs(1), exponent_coefs(2), exponent_coefs(3), exponent_coefs(4), &
+           ptrop, decay_exponent)
 
       do k = 1, size(pmid)
          if (pmid(k) >= ptrop) then
@@ -85,5 +77,68 @@ contains
       end do
 
    end subroutine stratospheric_trace_gas_profile
+
+   ! stratospheric_trace_gas_profile for column icol of whole arrays, writing
+   ! q(icol, :, m) (e.g. the constituent array and the gas's index), so it can
+   ! run in a column kernel (OpenACC routine seq). Same arithmetic.
+   pure subroutine stratospheric_trace_gas_profile_column(icol, trop_mmr, lat, &
+        degrees_per_radian, c1, c2, c3, c4, pmid, m, q)
+      !$acc routine seq
+      use ccpp_kinds, only: kind_phys
+
+      integer,         intent(in)    :: icol               ! column index
+      real(kind_phys), intent(in)    :: trop_mmr           ! tropospheric mixing ratio of the gas [kg kg-1]
+      real(kind_phys), intent(in)    :: lat                ! latitude of the column [rad]
+      real(kind_phys), intent(in)    :: degrees_per_radian ! 180/pi [deg rad-1]
+      real(kind_phys), intent(in)    :: c1, c2, c3, c4     ! decay exponent coefficients [1]
+      real(kind_phys), intent(in)    :: pmid(:, :)         ! air pressure at layer midpoints (ncol, nlev) [Pa]
+      integer,         intent(in)    :: m                  ! index in the third dimension of q
+      real(kind_phys), intent(inout) :: q(:, :, :)         ! gas mixing ratio, q(icol, :, m) written [kg kg-1]
+
+      real(kind_phys) :: ptrop           ! climatological tropopause pressure [Pa]
+      real(kind_phys) :: decay_exponent  ! stratospheric decay exponent [1]
+      integer         :: k
+
+      call trace_gas_profile_params(lat, degrees_per_radian, c1, c2, c3, c4, &
+           ptrop, decay_exponent)
+
+      do k = 1, size(pmid, 2)
+         if (pmid(icol, k) >= ptrop) then
+            q(icol, k, m) = trop_mmr
+         else
+            q(icol, k, m) = trop_mmr * (pmid(icol, k) / ptrop)**decay_exponent
+         end if
+      end do
+
+   end subroutine stratospheric_trace_gas_profile_column
+
+   ! Climatological tropopause pressure and stratospheric decay exponent of
+   ! stratospheric_trace_gas_profile (shared by its array and column forms).
+   pure subroutine trace_gas_profile_params(lat, degrees_per_radian, c1, c2, c3, c4, &
+        ptrop, decay_exponent)
+      !$acc routine seq
+      use ccpp_kinds, only: kind_phys
+
+      real(kind_phys), intent(in)  :: lat                ! latitude [rad]
+      real(kind_phys), intent(in)  :: degrees_per_radian ! 180/pi [deg rad-1]
+      real(kind_phys), intent(in)  :: c1, c2, c3, c4     ! decay exponent coefficients [1]
+      real(kind_phys), intent(out) :: ptrop              ! climatological tropopause pressure [Pa]
+      real(kind_phys), intent(out) :: decay_exponent     ! stratospheric decay exponent [1]
+
+      ! latitude of the switch between the two decay exponent branches [deg]
+      real(kind_phys), parameter :: exponent_branch_lat = 45._kind_phys
+
+      real(kind_phys) :: abs_lat_degrees ! abs(latitude) [deg]
+
+      abs_lat_degrees = abs(lat * degrees_per_radian)
+      if (abs_lat_degrees <= exponent_branch_lat) then
+         decay_exponent = c1 + c2 * abs_lat_degrees
+      else
+         decay_exponent = c3 + c4 * (abs_lat_degrees - exponent_branch_lat)
+      end if
+
+      ptrop = 250.0e2_kind_phys - 150.0e2_kind_phys * cos(lat)**2
+
+   end subroutine trace_gas_profile_params
 
 end module atmos_phys_rad_utils

@@ -494,8 +494,9 @@ contains
     character(len=*),   intent(out)   :: errmsg
     integer,            intent(out)   :: errflg
 
-    integer            :: i
+    integer            :: i, icol, k
     integer            :: const_idx
+    real(kind_phys)    :: mixing_ratio(ncol, pver) ! one species' prescribed mixing ratio [kg kg-1]
 
     character(len=*), parameter :: subname = 'prescribed_aerosols_run'
 
@@ -528,10 +529,13 @@ contains
         return
       end if
 
+      ! The species' mixing ratio is formed on the host (tracer_data), then
+      ! written to the constituent array on the device (the cap keeps the
+      ! constituent array there).
       if (.not. aero_map_list(i)%is_modal_aero_interstitial) then
         ! For non-interstitial species (cloud-borne or bulk aerosols),
         ! directly copy field data from tracer_data container
-        constituents(:ncol, :pver, const_idx) = &
+        mixing_ratio(:ncol, :pver) = &
              tracer_data_fields(aero_map_list(i)%field_index)%data(:ncol,:pver)
       else
         ! For modal aerosol interstitial species (_a), compute from log-normal distribution
@@ -541,12 +545,19 @@ contains
              pi, &
              tracer_data_fields(aero_map_list(i)%field_index)%data(:ncol,:pver), &
              tracer_data_fields(aero_map_list(i)%field_index_logv)%data(:ncol,:pver), &
-             constituents(:ncol, :pver, const_idx))
+             mixing_ratio(:ncol, :pver))
       end if
 
-      ! History output
+      !$acc parallel loop gang vector collapse(2) copyin(mixing_ratio) copy(constituents)
+      do k = 1, pver
+        do icol = 1, ncol
+          constituents(icol, k, const_idx) = mixing_ratio(icol, k)
+        end do
+      end do
+
+      ! History output (the same values as the constituent slice)
       call history_out_field(trim(aero_map_list(i)%constituent_name) // '_D', &
-                             constituents(:ncol, :pver, const_idx))
+                             mixing_ratio(:ncol, :pver))
     end do
 
   end subroutine prescribed_aerosols_run

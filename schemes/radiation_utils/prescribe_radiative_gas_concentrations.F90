@@ -199,7 +199,10 @@ contains
 
     ! Local variables
     integer         :: g
+    integer         :: i, k
+    integer         :: idx       ! constituent index of the gas
     real(kind_phys) :: vmr_gmean
+    real(kind_phys) :: mmr       ! mass mixing ratio filled into the slice
 
     errmsg = ''
     errcode = 0
@@ -210,7 +213,16 @@ contains
       if (errcode /= 0) then
         return
       end if
-      const_array(:, :, bindings(g)%const_idx) = vmr_gmean*bindings(g)%mmr_factor
+      ! Fill the gas's slice on the device (the lookup above is a host
+      ! scalar), so the constituent array stays where the cap keeps it.
+      idx = bindings(g)%const_idx
+      mmr = vmr_gmean*bindings(g)%mmr_factor
+      !$acc parallel loop gang vector collapse(2) copy(const_array)
+      do k = 1, size(const_array, 2)
+        do i = 1, size(const_array, 1)
+          const_array(i, k, idx) = mmr
+        end do
+      end do
     end do
 
   end subroutine prescribe_radiative_gas_concentrations_timestep_init

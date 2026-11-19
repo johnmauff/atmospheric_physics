@@ -276,7 +276,11 @@ contains
     ! Local variables
     integer         :: i, k
     integer         :: mmr_idx, rad_idx
-    real(kind_phys) :: to_mmr(ncol, pver)    ! unit conversion factor to MMR [1]
+    real(kind_phys) :: to_mmr                ! unit conversion factor to MMR [1]
+    integer         :: unit_kind             ! how to_mmr is computed: 1 from T and pmiddry, 2 = 1, 3 = molmass_volcaero/mwdry
+    real(kind_phys) :: field(ncol, pver)     ! tracer_data field (host copy for the device)
+    real(kind_phys) :: radius                ! geometric-mean radius at one point
+    real(kind_phys) :: colsum                ! column mass accumulator
     real(kind_phys) :: mmrvolc               ! volcanic aerosol MMR [kg kg-1]
     real(kind_phys) :: concvolc              ! mass concentration of volcanic aerosol [kg m-3]
     real(kind_phys) :: volcmass(ncol, pver)  ! volcanic aerosol mass path in layer [kg m-2]
@@ -307,47 +311,71 @@ contains
     case ("molec/cm3", "/cm3", "molecules/cm3", "cm^-3", "cm**-3")
       ! Number density [molecules cm-3] -> MMR [kg kg-1]
       ! mmr = (M * 1e6 * k_B * T) / (M_air * p_dry)
-      to_mmr(:ncol,:) = (molmass_volcaero * 1.0e6_kind_phys * boltz * T(:ncol,:)) &
-                       / (mwdry * pmiddry(:ncol,:))
+      unit_kind = 1
     case ('kg/kg', 'mmr', 'kg kg-1')
-      to_mmr(:ncol,:) = 1.0_kind_phys
+      unit_kind = 2
     case ('mol/mol', 'mole/mole', 'vmr', 'fraction')
-      to_mmr(:ncol,:) = molmass_volcaero / mwdry
+      unit_kind = 3
     case default
       errflg = 1
       errmsg = subname//': unrecognized units: '//trim(tracer_data_fields(1)%units)
       return
     end select
 
+    field(:ncol, :pver) = tracer_data_fields(1)%data(:ncol, :pver)
+
     ! Convert tracer_data field to MMR and store in constituent array.
     ! Apply tropopause masking: zero below tropopause.
     ! Compute geometric-mean radius where MMR > 0 above tropopause.
-    constituents(:ncol, :pver, rad_idx) = 0.0_kind_phys
+    ! Compute volcanic aerosol mass path in each layer [kg m-2] and the column
+    ! mass (levels summed in order) for the history output.
+    ! OpenACC: on the device, where the cap keeps the constituent array; the
+    ! two history fields come back to the host.
+    !$acc data copyin(field, T, pmiddry, pdel, zm, tropLev) copy(constituents) &
+    !$acc      copyout(volcmass, columnmass)
 
+    !$acc parallel loop gang vector collapse(2) private(to_mmr, mmrvolc, concvolc, radius)
     do k = 1, pver
       do i = 1, ncol
         ! Apply unit conversion
-        mmrvolc = to_mmr(i, k) * tracer_data_fields(1)%data(i, k)
-
+        select case (unit_kind)
+        case (1)
+          to_mmr = (molmass_volcaero * 1.0e6_kind_phys * boltz * T(i,k)) &
+                   / (mwdry * pmiddry(i,k))
+        case (2)
+          to_mmr = 1.0_kind_phys
+        case default
+          to_mmr = molmass_volcaero / mwdry
+        end select
+        mmrvolc = to_mmr * field(i, k)
         ! Zero below tropopause
         if (k >= tropLev(i)) then
           mmrvolc = 0.0_kind_phys
         end if
-
         constituents(i, k, mmr_idx) = mmrvolc
-
         ! Compute geometric-mean wet aerosol radius from mass concentration
+        radius = 0.0_kind_phys
         if (mmrvolc > 0.0_kind_phys) then
           ! concvolc [kg m-3] = mmr [kg kg-1] * pdel [Pa] / (g [m s-2] * zm [m])
           concvolc = (mmrvolc * pdel(i, k)) / (gravit * zm(i, k))
-          constituents(i, k, rad_idx) = radius_conversion * (concvolc ** (1.0_kind_phys / 3.0_kind_phys))
+          radius = radius_conversion * (concvolc ** (1.0_kind_phys / 3.0_kind_phys))
         end if
+        constituents(i, k, rad_idx) = radius
+        volcmass(i, k) = mmrvolc * pdel(i, k) / gravit
       end do
     end do
 
-    ! Compute volcanic aerosol mass path in each layer [kg m-2]
-    volcmass(:ncol, :pver)  = constituents(:ncol, :pver, mmr_idx) * pdel(:ncol, :pver) / gravit
-    columnmass(:ncol) = sum(volcmass(:ncol, :pver), 2)
+    !$acc parallel loop gang vector private(colsum)
+    do i = 1, ncol
+      colsum = 0.0_kind_phys
+      !$acc loop seq
+      do k = 1, pver
+        colsum = colsum + volcmass(i, k)
+      end do
+      columnmass(i) = colsum
+    end do
+
+    !$acc end data
 
     ! History output
     call history_out_field('VOLC_MASS',   volcmass(:, :))

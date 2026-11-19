@@ -188,8 +188,13 @@ contains
     character(len=*),   intent(out)   :: errmsg
     integer,            intent(out)   :: errflg
 
-    ! conversion factor to mass mixing ratio (kg kg-1 dry)
-    real(kind_phys) :: to_mmr(ncol, pver)
+    ! conversion factor to mass mixing ratio (kg kg-1 dry), per point
+    real(kind_phys) :: to_mmr
+    ! how to_mmr is computed: 1 = 1, 2 = ozone_mw/mwdry, 3 = from t and pmiddry
+    integer :: unit_kind
+    ! converted ozone at one point (stored once)
+    real(kind_phys) :: o3
+    integer :: i, k
 
     ! prescribed ozone mass mixing ratio [kg kg-1 dry]
     real(kind_phys) :: prescribed_ozone(ncol, pver)
@@ -231,23 +236,38 @@ contains
     ! unit conversions needed for this field to be in kg kg-1 dry?
     select case(units_str)
       case('kg/kg', 'mmr')
-        to_mmr = 1._kind_phys
+        unit_kind = 1
       case('mol/mol', 'mole/mole', 'vmr', 'fraction')
-        to_mmr = ozone_mw/mwdry
+        unit_kind = 2
       case('molec/cm3', '/cm3', 'molecules/cm3', 'cm^-3', 'cm**-3')
-        to_mmr(:ncol,:pver) = (ozone_mw*1e6_kind_phys*boltz*t(:ncol,:pver))/&
-                              (mwdry*pmiddry(:ncol,:pver))
+        unit_kind = 3
       case default
         errflg = 1
         errmsg = 'prescribed_ozone_run: unit' // units_str //' are not recognized'
         return
     end select
 
-    ! convert to kg kg-1 (dry)
-    prescribed_ozone = to_mmr * prescribed_ozone
-
-    ! write to constituent array
-    constituents(:ncol, :pver, id_o3) = prescribed_ozone
+    ! Convert to kg kg-1 (dry) and write to the constituent array on the
+    ! device (the cap keeps the constituent array there); the converted field
+    ! comes back for the history output.
+    !$acc parallel loop gang vector collapse(2) private(to_mmr, o3) &
+    !$acc   copy(prescribed_ozone) copyin(t, pmiddry) copy(constituents)
+    do k = 1, pver
+      do i = 1, ncol
+        select case (unit_kind)
+        case (1)
+          to_mmr = 1._kind_phys
+        case (2)
+          to_mmr = ozone_mw/mwdry
+        case default
+          to_mmr = (ozone_mw*1e6_kind_phys*boltz*t(i,k))/&
+                   (mwdry*pmiddry(i,k))
+        end select
+        o3 = to_mmr * prescribed_ozone(i,k)
+        prescribed_ozone(i,k) = o3
+        constituents(i, k, id_o3) = o3
+      end do
+    end do
 
     ! convert to mol mol-1 (dry) only for diagnostic output
     call history_out_field('ozone', prescribed_ozone(:ncol,:pver)*(mwdry/ozone_mw))

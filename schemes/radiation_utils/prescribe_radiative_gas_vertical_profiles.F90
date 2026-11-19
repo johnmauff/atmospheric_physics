@@ -90,7 +90,7 @@ contains
              ncol, pver, lat, pi, &
              pmid, constituents, errmsg, errflg)
 
-    use atmos_phys_rad_utils, only: stratospheric_trace_gas_profile
+    use atmos_phys_rad_utils, only: stratospheric_trace_gas_profile_column
 
     integer,          intent(in)    :: ncol
     integer,          intent(in)    :: pver
@@ -105,6 +105,8 @@ contains
     integer         :: m, i
     real(kind_phys) :: degrees_per_radian ! 180/pi [deg rad-1]
     real(kind_phys) :: trop_mmr           ! tropospheric mixing ratio of the gas [kg kg-1]
+    integer         :: idx                ! constituent index of the gas
+    real(kind_phys) :: c1, c2, c3, c4     ! the gas's decay exponent coefficients [1]
 
     errmsg = ''
     errflg = 0
@@ -115,12 +117,21 @@ contains
       if (.not. gas_handled(m)) then
         cycle
       end if
+      idx = gas_const_idx(m)
+      c1 = exponent_coefs(1, m)
+      c2 = exponent_coefs(2, m)
+      c3 = exponent_coefs(3, m)
+      c4 = exponent_coefs(4, m)
+      ! One thread per column, on the device where the cap keeps the
+      ! constituent array.
+      !$acc parallel loop gang vector private(trop_mmr) &
+      !$acc   copyin(lat, pmid) copy(constituents)
       do i = 1, ncol
         ! The bottom layer is below the tropopause everywhere.
         ! It holds the tropospheric value set by the uniform fills and is preserved by the profile rewrite:
-        trop_mmr = constituents(i, pver, gas_const_idx(m))
-        call stratospheric_trace_gas_profile(trop_mmr, lat(i), degrees_per_radian, &
-             exponent_coefs(:, m), pmid(i, :), constituents(i, :, gas_const_idx(m)))
+        trop_mmr = constituents(i, pver, idx)
+        call stratospheric_trace_gas_profile_column(i, trop_mmr, lat(i), degrees_per_radian, &
+             c1, c2, c3, c4, pmid, idx, constituents)
       end do
     end do
 
