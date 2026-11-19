@@ -245,8 +245,11 @@ contains
     ! (a sum as opposed to a logical "or" operation)
     !
     !==================================================================================
-    ! OpenACC: the vector qsat/svp calls run their own kernels on es, qs, esl
-    ! and esi, which this data region makes present. Per-column passes (the
+    ! OpenACC: the cldfrc_ice branch's vector qsat_water/svp calls run their
+    ! own kernels on qs, esl and esi, which this data region makes present
+    ! (kept as vector calls: their GoffGratch vector forms round differently
+    ! from the per-point ones). The cam4 branch computes qsat per point
+    ! (qsat_line, routine seq) in one kernel. Per-column passes (the
     ! inversion search) are one thread per column with levels sequential.
     !$acc data copyin(pmid, ps, temp, sst, q, cldice, phis, concld, landfrac, ocnfrac, snowh) &
     !$acc      copyout(cloud, rhcloud, cldst, rhu00, icecldf, liqcldf) &
@@ -283,8 +286,11 @@ contains
       end do
     else
       ! If not computing ice cloud fraction (CAM4 RK Rasch-Kristjansson microphysics) then hybrid RH,
+      !$acc parallel loop gang vector collapse(2)
       do k = top_lev_cloudphys, pver
-        call qsat(temp(1:ncol, k), pmid(1:ncol, k), es(1:ncol, k), qs(1:ncol, k), ncol)
+        do i = 1, ncol
+          call qsat(temp(i, k), pmid(i, k), es(i, k), qs(i, k))
+        end do
       end do
     end if
 

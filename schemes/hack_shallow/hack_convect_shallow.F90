@@ -382,8 +382,9 @@ contains
 
     ! OpenACC: the level loop (kloop) runs on the host; each level is one
     ! kernel over columns (one thread per column) for the cloud model and
-    ! constituent transport, then the vector qsat (its own kernels) and a
-    ! scatter kernel. Columns are independent within a level, so a mask
+    ! constituent transport, then one kernel for the per-point qsat
+    ! (qsat_line, routine seq) and the scatter. Columns are independent
+    ! within a level, so a mask
     ! (convect) replaces the gathered index vector of the CPU original;
     ! every column's operations are unchanged.
     !$acc data copyin(pmid, pdel, rpdel, rpdeldry, zm, qpert_in, phis, pblh, t, q, const_dry) &
@@ -459,16 +460,11 @@ contains
        end do
     end do
 
-    ! Compute sb,hb,shbs,hbs
-    do k = limcnv,pver
-       call qsat(tb(1:ncol,k), pmid(1:ncol,k), &
-            estemp(1:ncol,k), shbs(1:ncol,k), ncol, &
-            gam=gam(1:ncol,k))
-    end do
-
+    ! Compute sb,hb,shbs,hbs (qsat per point: qsat_line, routine seq)
     !$acc parallel loop gang vector collapse(2)
     do k=limcnv,pver
        do i=1,ncol
+          call qsat(tb(i,k), pmid(i,k), estemp(i,k), shbs(i,k), gam=gam(i,k))
           sb (i,k) = cp*tb(i,k) + zm(i,k)*grav + phis(i)
           hb (i,k) = sb(i,k) + hlat*shb(i,k)
           hbs(i,k) = sb(i,k) + hlat*shbs(i,k)
@@ -877,20 +873,19 @@ contains
       ! This if restructured from a goto
       if (k /= limcnv+1) then
         ! Complete update of thermodynamic structure at integer levels:
-        ! new values of shbs and gamma at levels k and k-1. The vector qsat
-        ! runs over every column (the CPU original gathered the convecting
-        ! ones); it is pointwise, and only convecting columns take the result.
+        ! new values of shbs and gamma at levels k and k-1. qsat runs per
+        ! point (qsat_line, routine seq) for every column (the CPU original
+        ! gathered the convecting ones); only convecting columns take the
+        ! result. The vtemp scratch keeps the values the vector call left.
         !$acc parallel loop gang vector
         do i=1,ncol
            vtemp1(i     ) = tb(i,k)
            vtemp1(i+ncol) = tb(i,k-1)
            vtemp2(i     ) = pmid(i,k)
            vtemp2(i+ncol) = pmid(i,k-1)
-        end do
-        call qsat(vtemp1(1:2*ncol), vtemp2(1:2*ncol), &
-                  vtemp5(1:2*ncol), vtemp3(1:2*ncol), 2*ncol, gam=vtemp4(1:2*ncol))
-        !$acc parallel loop gang vector
-        do i=1,ncol
+           call qsat(vtemp1(i), vtemp2(i), vtemp5(i), vtemp3(i), gam=vtemp4(i))
+           call qsat(vtemp1(i+ncol), vtemp2(i+ncol), vtemp5(i+ncol), vtemp3(i+ncol), &
+                     gam=vtemp4(i+ncol))
            if (convect(i)) then
               shbs(i,k  ) = vtemp3(i     )
               shbs(i,k-1) = vtemp3(i+ncol)

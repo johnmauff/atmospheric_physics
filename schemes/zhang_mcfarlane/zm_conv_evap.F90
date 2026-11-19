@@ -109,8 +109,8 @@ subroutine zm_conv_evap_run(ncol, pver, pverp, &
     omsm=0.9999_kind_phys
 
     ! OpenACC: one thread per column, levels sequential (the top-down pass is
-    ! the CPU's per-column order). The vector qsat runs its own kernels on
-    ! es and qs, which this data region makes present.
+    ! the CPU's per-column order). Saturation is per point (qsat_line,
+    ! routine seq) in one kernel, not a vector qsat call per level.
     !$acc data copyin(t, pmid, pdel, q, prdprec_gen, cldfrc, fsnow_conv) &
     !$acc      copy(prec_gen) &
     !$acc      copyout(tend_s, tend_q, tend_s_snwprd, tend_s_snwevmlt, snow, &
@@ -124,8 +124,11 @@ subroutine zm_conv_evap_run(ncol, pver, pverp, &
     end do
 
 ! determine saturation vapor pressure
+    !$acc parallel loop gang vector collapse(2)
     do k = 1,pver
-       call qsat(t(1:ncol,k), pmid(1:ncol,k), es(1:ncol,k), qs(1:ncol,k), ncol)
+       do i = 1, ncol
+          call qsat(t(i,k), pmid(i,k), es(i,k), qs(i,k))
+       end do
     end do
 
     !$acc parallel loop gang vector private(k, work1, work2, kemask, evplimit, dum)

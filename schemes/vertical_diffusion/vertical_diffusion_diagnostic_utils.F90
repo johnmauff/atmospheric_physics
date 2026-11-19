@@ -160,9 +160,13 @@ contains
     slv_pre_PBL(:ncol, :pver) = sl_pre_PBL(:ncol, :pver) &
                                 * (1.0_kind_phys + zvir * qt_pre_PBL(:ncol, :pver))
 
-    ! Compute saturation vapor pressure and relative humidity before PBL
+    ! Compute saturation vapor pressure and relative humidity before PBL.
+    ! qsat per point (qsat_line) on the host: this diagnostic runs on the
+    ! host, and the vector qsat would copy each level to the GPU and back.
     do k = 1, pver
-       call qsat(t0(:ncol, k), pmid(:ncol, k), tem2_pre(:ncol, k), sat_pre(:ncol, k), ncol)
+       do i = 1, ncol
+          call qsat(t0(i, k), pmid(i, k), tem2_pre(i, k), sat_pre(i, k))
+       end do
     end do
     rh_pre_PBL(:ncol, :pver) = q0_wv(:ncol, :pver) / sat_pre(:ncol, :pver) * 100.0_kind_phys
 
@@ -201,8 +205,11 @@ contains
     t_aft_PBL(:ncol, :pver) = (s_aft_PBL(:ncol, :pver) - gravit * zm(:ncol, :pver)) / cpair
 
     ! Compute saturation vapor pressure and relative humidity after PBL
+    ! (qsat per point on the host, as above)
     do k = 1, pver
-       call qsat(t_aft_PBL(:ncol, k), pmid(:ncol, k), tem2_aft(:ncol, k), sat_aft(:ncol, k), ncol)
+       do i = 1, ncol
+          call qsat(t_aft_PBL(i, k), pmid(i, k), tem2_aft(i, k), sat_aft(i, k))
+       end do
     end do
     rh_aft_PBL(:ncol, :pver) = qv_aft_PBL(:ncol, :pver) / sat_aft(:ncol, :pver) * 100.0_kind_phys
 
