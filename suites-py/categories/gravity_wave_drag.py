@@ -34,6 +34,12 @@ def gravity_wave_drag(*, sources):
 
     def drag():
         gravity_wave_drag_prepare_profiles()
+        # Inputs only some sources need (the CAM7 sources' coords1d), once each.
+        done = []
+        for source in sources:
+            if source.inputs is not None and all(source.inputs is not d for d in done):
+                source.inputs()
+                done.append(source.inputs)
         gravity_wave_drag_top_taper()   # taper drag towards the model top
         for source in sources:
             source.run()

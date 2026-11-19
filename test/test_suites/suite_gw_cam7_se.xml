@@ -31,6 +31,9 @@
     <!-- Interstitial: Prepare vertical profiles and accumulated quantities -->
     <scheme>check_energy_zero_fluxes</scheme>
     <scheme>gravity_wave_drag_prepare_profiles</scheme>
+    <!-- Pressure-coordinate object (coords1d) the CAM7 sources read;
+         prepare_profiles and the orographic source work from pint. -->
+    <scheme>gravity_wave_drag_pressure_coordinates</scheme>
 
     <!-- Prepare vertical ramp coefficients to taper drag at top of model -->
     <scheme>gravity_wave_drag_top_taper</scheme>

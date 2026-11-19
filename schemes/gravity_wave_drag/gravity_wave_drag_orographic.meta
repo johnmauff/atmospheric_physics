@@ -3,6 +3,7 @@
   type = scheme
   dependencies = gw_utils.F90,gw_common.F90,../../to_be_ccppized/coords_1d.F90
   dependencies = ../../phys_utils/atmos_phys_interp_utils.F90
+  dependencies = ../../phys_utils/atmos_phys_fin_vol_solver.F90
 
 [ccpp-arg-table]
   name  = gravity_wave_drag_orographic_init
@@ -71,11 +72,11 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
-[ p ]
-  standard_name = vertical_moist_pressure_coordinates_for_gravity_wave_drag
+[ pint ]
+  standard_name = air_pressure_at_interface
   units = Pa
-  type = coords1d
-  dimensions = ()
+  type = real | kind = kind_phys
+  dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
 [ vramp ]
   standard_name = gravity_wave_drag_tapering_coefficients

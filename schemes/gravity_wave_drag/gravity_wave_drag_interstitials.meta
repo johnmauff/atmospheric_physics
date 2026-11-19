@@ -1,7 +1,6 @@
 [ccpp-table-properties]
   name = gravity_wave_drag_prepare_profiles
   type = scheme
-  dependencies = gw_utils.F90,../../to_be_ccppized/coords_1d.F90
 
 [ccpp-arg-table]
   name  = gravity_wave_drag_prepare_profiles_run
@@ -72,12 +71,6 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
-[ p ]
-  standard_name = vertical_moist_pressure_coordinates_for_gravity_wave_drag
-  units = Pa
-  type = coords1d
-  dimensions = ()
-  intent = out
 [ rhoi ]
   standard_name = air_density_at_interfaces_for_gravity_wave_drag
   units = kg m-3
@@ -157,8 +150,53 @@
   dimensions = ()
   intent = out
 
+[ccpp-table-properties]
+  name = gravity_wave_drag_pressure_coordinates
+  type = scheme
+  dependencies = ../../to_be_ccppized/coords_1d.F90
+
 [ccpp-arg-table]
-  name  = gravity_wave_drag_prepare_profiles_timestep_final
+  name  = gravity_wave_drag_pressure_coordinates_run
+  type  = scheme
+[ ncol ]
+  standard_name = horizontal_loop_extent
+  units = count
+  type = integer
+  dimensions = ()
+  intent = in
+[ pver ]
+  standard_name = vertical_layer_dimension
+  units = count
+  type = integer
+  dimensions = ()
+  intent = in
+[ pint ]
+  standard_name = air_pressure_at_interface
+  units = Pa
+  type = real | kind = kind_phys
+  dimensions = (horizontal_loop_extent, vertical_interface_dimension)
+  intent = in
+[ p ]
+  standard_name = vertical_moist_pressure_coordinates_for_gravity_wave_drag
+  units = Pa
+  type = coords1d
+  dimensions = ()
+  intent = out
+[ errmsg ]
+  standard_name = ccpp_error_message
+  units = none
+  type = character | kind = len=512
+  dimensions = ()
+  intent = out
+[ errflg ]
+  standard_name = ccpp_error_code
+  units = 1
+  type = integer
+  dimensions = ()
+  intent = out
+
+[ccpp-arg-table]
+  name  = gravity_wave_drag_pressure_coordinates_timestep_final
   type  = scheme
 [ p ]
   standard_name = vertical_moist_pressure_coordinates_for_gravity_wave_drag

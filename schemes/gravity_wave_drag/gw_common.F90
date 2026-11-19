@@ -19,6 +19,7 @@ module gw_common
   public :: qbo_hdepth_scaling
   public :: calc_taucd, momentum_flux, momentum_fixer
   public :: energy_change, energy_fixer
+  public :: gw_drag_prof_column, energy_change_column
   public :: coriolis_speed, adjust_inertial
   public :: find_bin
 
@@ -77,6 +78,10 @@ module gw_common
 
   ! Inverse Prandtl number.
   real(kind_phys) :: prndl
+
+  ! Module data read by gw_drag_prof_column/energy_change_column on the
+  ! device; set in gravity_wave_drag_common_init (update device at its end).
+  !$acc declare create(gravit, rog, alpha, prndl, tau_0_ubc)
 
   !
   ! Limits to keep values reasonable.
@@ -276,10 +281,16 @@ contains
 
     rog = rair/gravit
 
+    !$acc update device(gravit, rog, alpha, prndl, tau_0_ubc)
+
   end subroutine gravity_wave_drag_common_init
 
 !==========================================================================
 
+  ! Solve for the drag profile from the multiple gravity wave drag
+  ! parameterization, for all columns: a host loop over
+  ! gw_drag_prof_column (see there). Kept for the schemes that still pass
+  ! a Coords1D and a GWBand.
   subroutine gw_drag_prof(ncol, band, p, src_level, tend_level, dt, &
                           t, vramp, &
                           piln, rhoi, nm, ni, ubm, ubi, xv, yv, &
@@ -287,21 +298,7 @@ contains
                           ttgw, qtgw, egwdffi, gwut, dttdf, dttke, &
                           ro_adjust, kwvrdg, satfac_in, lapply_effgw_in, lapply_vdiff, tau_diag)
 
-    !-----------------------------------------------------------------------
-    ! Solve for the drag profile from the multiple gravity wave drag
-    ! parameterization.
-    ! 1. scan up from the wave source to determine the stress profile
-    ! 2. scan down the stress profile to determine the tendencies
-    !     => apply bounds to the tendency
-    !          a. from wkb solution
-    !          b. from computational stability constraints
-    !     => adjust stress on interface below to reflect actual bounded
-    !        tendency
-    !-----------------------------------------------------------------------
-
     use coords_1d, only: coords1d
-    use gw_diffusion, only: gw_ediff, gw_diff_tend
-    use linear_1d_operators, only: TriDiagDecomp
 
     !------------------------------Arguments--------------------------------
     ! Column dimension.
@@ -314,14 +311,9 @@ contains
     integer, intent(in) :: src_level(:)
     ! Lowest level where wind tendencies are calculated.
     integer, intent(in) :: tend_level(:)
-    ! Using tend_level > src_level allows the orographic waves to prescribe
-    ! wave propagation up to a certain level, but then allow wind tendencies
-    ! and adjustments to tau below that level.
-
     ! Time step.
     real(kind_phys), intent(in) :: dt
-
-    ! Midpoint and interface temperatures.
+    ! Midpoint temperatures.
     real(kind_phys), intent(in) :: t(:, :)
     ! Log of interface pressures.
     real(kind_phys), intent(in) :: piln(:, :)
@@ -336,7 +328,7 @@ contains
     ! Tendency efficiency.
     real(kind_phys), intent(in) :: effgw(:)
     ! Wave phase speeds for each column.
-    real(kind_phys), intent(in) :: c(ncol, -band%ngwv:band%ngwv)
+    real(kind_phys), intent(in) :: c(:, -band%ngwv:)
     ! Molecular thermal diffusivity.
     real(kind_phys), intent(in) :: kvtt(:, :)
     ! Constituent array.
@@ -345,76 +337,198 @@ contains
     real(kind_phys), intent(in) :: dse(:, :)
     ! Coefficient to ramp down diffusion coeff.
     real(kind_phys), intent(in) :: vramp(:)
-
     ! Wave Reynolds stress.
-    real(kind_phys), intent(inout) :: tau(ncol, -band%ngwv:band%ngwv, pver + 1)
+    real(kind_phys), intent(inout) :: tau(:, -band%ngwv:, :)
     ! Zonal/meridional wind tendencies.
     real(kind_phys), intent(out) :: utgw(:, :), vtgw(:, :)
     ! Gravity wave heating tendency.
     real(kind_phys), intent(out) :: ttgw(:, :)
     ! Gravity wave constituent tendency.
     real(kind_phys), intent(out) :: qtgw(:, :, :)
-
     ! Effective gravity wave diffusivity at interfaces.
     real(kind_phys), intent(out) :: egwdffi(:, :)
-
     ! Gravity wave wind tendency for each wave.
-    real(kind_phys), intent(out) :: gwut(ncol, pver, -band%ngwv:band%ngwv)
-
+    real(kind_phys), intent(out) :: gwut(:, :, -band%ngwv:)
     ! Temperature tendencies from diffusion and kinetic energy.
     real(kind_phys), intent(out) :: dttdf(:, :)
     real(kind_phys), intent(out) :: dttke(:, :)
-
     ! Adjustment parameter for IGWs.
-    real(kind_phys), intent(in), optional :: &
-      ro_adjust(ncol, -band%ngwv:band%ngwv, pver + 1)
-
+    real(kind_phys), intent(in), optional :: ro_adjust(:, -band%ngwv:, :)
     ! Diagnosed horizontal wavenumber for ridges.
-    real(kind_phys), intent(in), optional :: &
-      kwvrdg(:)
-
-    ! Factor for saturation calculation. Here backwards
-    ! compatibility. I believe it should be 1.0 (jtb).
-    ! Looks like it has been 2.0 for a while in CAM.
-    real(kind_phys), intent(in), optional :: &
-      satfac_in
-
+    real(kind_phys), intent(in), optional :: kwvrdg(:)
+    ! Factor for saturation calculation.
+    real(kind_phys), intent(in), optional :: satfac_in
     logical, intent(in), optional :: lapply_effgw_in, lapply_vdiff
     ! Provisional Wave Reynolds stress.
     real(kind_phys), intent(out), optional :: tau_diag(:, :)
 
     !---------------------------Local storage-------------------------------
-
-    ! Level, wavenumber, constituent and column loop indices.
-    integer :: k, l, m, i
-
-    ! Lowest tendency and source levels.
+    integer :: i
+    ! Lowest tendency and source levels (over all columns).
     integer :: kbot_tend, kbot_src
+    ! Work arrays for gw_drag_prof_column.
+    real(kind_phys) :: egwdffm(ncol, pver), dpidz_sq(ncol, pver + 1)
+    real(kind_phys) :: ca(ncol, pver), ze(ncol, pver), dnom(ncol, pver)
+    real(kind_phys) :: qwork(ncol, pver)
+
+    ! Lowest levels that loops need to iterate over.
+    kbot_tend = maxval(tend_level)
+    kbot_src = maxval(src_level)
+
+    do i = 1, ncol
+      call gw_drag_prof_column(i, band%ngwv, band%kwv, band%effkwv, &
+                               kbot_src, kbot_tend, src_level, tend_level, dt, &
+                               t, vramp, piln, rhoi, nm, ni, ubm, ubi, xv, yv, &
+                               effgw, c, kvtt, q, dse, p%del, p%rdel, p%rdst, &
+                               tau, utgw, vtgw, ttgw, qtgw, egwdffi, gwut, dttdf, dttke, &
+                               egwdffm, dpidz_sq, ca, ze, dnom, qwork, &
+                               ro_adjust=ro_adjust, kwvrdg=kwvrdg, satfac_in=satfac_in, &
+                               lapply_effgw_in=lapply_effgw_in, lapply_vdiff=lapply_vdiff, &
+                               tau_diag=tau_diag)
+    end do
+
+  end subroutine gw_drag_prof
+
+!==========================================================================
+
+  subroutine gw_drag_prof_column(icol, ngwv, kwv, effkwv, kbot_src, kbot_tend, &
+                                 src_level, tend_level, dt, &
+                                 t, vramp, piln, rhoi, nm, ni, ubm, ubi, xv, yv, &
+                                 effgw, c, kvtt, q, dse, del, rdel, rdst, &
+                                 tau, utgw, vtgw, ttgw, qtgw, egwdffi, gwut, dttdf, dttke, &
+                                 egwdffm, dpidz_sq, ca, ze, dnom, qwork, &
+                                 ro_adjust, kwvrdg, satfac_in, lapply_effgw_in, lapply_vdiff, &
+                                 tau_diag)
+    !$acc routine seq
+
+    !-----------------------------------------------------------------------
+    ! Solve for the drag profile from the multiple gravity wave drag
+    ! parameterization, for column icol.
+    ! 1. scan up from the wave source to determine the stress profile
+    ! 2. scan down the stress profile to determine the tendencies
+    !     => apply bounds to the tendency
+    !          a. from wkb solution
+    !          b. from computational stability constraints
+    !     => adjust stress on interface below to reflect actual bounded
+    !        tendency
+    !
+    ! Arrays are passed whole, (ncol, ...), and only column icol is read or
+    ! written; the arithmetic per column is that of the former array code
+    ! (whole-column where blocks written out per point, same statement
+    ! order). Level values are kept in scalars and stored once.
+    ! kbot_src and kbot_tend are maxval(src_level) and maxval(tend_level)
+    ! over all columns, so every column loops over the same levels as before.
+    !-----------------------------------------------------------------------
+
+    use gw_diffusion, only: gw_ediff_column, gw_diff_tend_column, gw_diff_tend_column_3d
+
+    !------------------------------Arguments--------------------------------
+    ! Column index.
+    integer, intent(in) :: icol
+    ! Band: number of waves either side of zero, wavenumber, effective
+    ! wavenumber (GWBand's ngwv, kwv, effkwv).
+    integer, intent(in) :: ngwv
+    real(kind_phys), intent(in) :: kwv, effkwv
+    ! Lowest source and tendency levels over all columns.
+    integer, intent(in) :: kbot_src, kbot_tend
+    ! Level from which gravity waves are propagated upward.
+    integer, intent(in) :: src_level(:)
+    ! Lowest level where wind tendencies are calculated.
+    ! Using tend_level > src_level allows the orographic waves to prescribe
+    ! wave propagation up to a certain level, but then allow wind tendencies
+    ! and adjustments to tau below that level.
+    integer, intent(in) :: tend_level(:)
+    ! Time step.
+    real(kind_phys), intent(in) :: dt
+    ! Midpoint temperatures.
+    real(kind_phys), intent(in) :: t(:, :)
+    ! Coefficient to ramp down diffusion coeff.
+    real(kind_phys), intent(in) :: vramp(:)
+    ! Log of interface pressures.
+    real(kind_phys), intent(in) :: piln(:, :)
+    ! Interface densities.
+    real(kind_phys), intent(in) :: rhoi(:, :)
+    ! Midpoint and interface Brunt-Vaisalla frequencies.
+    real(kind_phys), intent(in) :: nm(:, :), ni(:, :)
+    ! Projection of wind at midpoints and interfaces.
+    real(kind_phys), intent(in) :: ubm(:, :), ubi(:, :)
+    ! Unit vectors of source wind (zonal and meridional components).
+    real(kind_phys), intent(in) :: xv(:), yv(:)
+    ! Tendency efficiency.
+    real(kind_phys), intent(in) :: effgw(:)
+    ! Wave phase speeds for each column.
+    real(kind_phys), intent(in) :: c(:, -ngwv:)
+    ! Molecular thermal diffusivity.
+    real(kind_phys), intent(in) :: kvtt(:, :)
+    ! Constituent array.
+    real(kind_phys), intent(in) :: q(:, :, :)
+    ! Dry static energy.
+    real(kind_phys), intent(in) :: dse(:, :)
+    ! Pressure coordinates: layer thickness, its inverse, and the inverse
+    ! distance between midpoints (Coords1D's del, rdel, rdst).
+    real(kind_phys), intent(in) :: del(:, :), rdel(:, :), rdst(:, :)
+    ! Wave Reynolds stress.
+    real(kind_phys), intent(inout) :: tau(:, -ngwv:, :)
+    ! Zonal/meridional wind tendencies.
+    real(kind_phys), intent(inout) :: utgw(:, :), vtgw(:, :)
+    ! Gravity wave heating tendency.
+    real(kind_phys), intent(inout) :: ttgw(:, :)
+    ! Gravity wave constituent tendency.
+    real(kind_phys), intent(inout) :: qtgw(:, :, :)
+    ! Effective gravity wave diffusivity at interfaces.
+    real(kind_phys), intent(inout) :: egwdffi(:, :)
+    ! Gravity wave wind tendency for each wave.
+    real(kind_phys), intent(inout) :: gwut(:, :, -ngwv:)
+    ! Temperature tendencies from diffusion and kinetic energy.
+    real(kind_phys), intent(inout) :: dttdf(:, :)
+    real(kind_phys), intent(inout) :: dttke(:, :)
+    ! Work arrays: (ncol, pver) except dpidz_sq (ncol, pver+1).
+    real(kind_phys), intent(inout) :: egwdffm(:, :), dpidz_sq(:, :)
+    real(kind_phys), intent(inout) :: ca(:, :), ze(:, :), dnom(:, :)
+    real(kind_phys), intent(inout) :: qwork(:, :)
+    ! Adjustment parameter for IGWs.
+    real(kind_phys), intent(in), optional :: ro_adjust(:, -ngwv:, :)
+    ! Diagnosed horizontal wavenumber for ridges.
+    real(kind_phys), intent(in), optional :: kwvrdg(:)
+    ! Factor for saturation calculation. Here backwards
+    ! compatibility. I believe it should be 1.0 (jtb).
+    ! Looks like it has been 2.0 for a while in CAM.
+    real(kind_phys), intent(in), optional :: satfac_in
+    logical, intent(in), optional :: lapply_effgw_in, lapply_vdiff
+    ! Provisional Wave Reynolds stress.
+    real(kind_phys), intent(inout), optional :: tau_diag(:, :)
+
+    !---------------------------Local storage-------------------------------
+
+    ! Level, wavenumber and constituent loop indices.
+    integer :: k, l, m
 
     ! "Total" and saturation diffusivity.
-    real(kind_phys) :: d(ncol)
+    real(kind_phys) :: d
     ! Imaginary part of vertical wavenumber.
-    real(kind_phys) :: mi(ncol)
+    real(kind_phys) :: mi
     ! Stress after damping.
-    real(kind_phys) :: taudmp(ncol)
+    real(kind_phys) :: taudmp
     ! Saturation stress.
-    real(kind_phys) :: tausat(ncol)
+    real(kind_phys) :: tausat
     ! (ub-c) and (ub-c)**2
-    real(kind_phys) :: ubmc(ncol), ubmc2(ncol)
+    real(kind_phys) :: ubmc, ubmc2
     ! Temporary ubar tendencies (overall, and at wave l).
-    real(kind_phys) :: ubt(ncol, pver), ubtl(ncol)
-    real(kind_phys) :: wrk(ncol)
+    real(kind_phys) :: ubt, ubtl
+    real(kind_phys) :: wrk
     ! Ratio used for ubt tndmax limiting.
-    real(kind_phys) :: ubt_lim_ratio(ncol)
+    real(kind_phys) :: ubt_lim_ratio
+    ! Wind tendency of one wave, and of the mean wind projected on the
+    ! components, at one level.
+    real(kind_phys) :: gwut_lev, utgw_lev, vtgw_lev
+    ! Kinetic energy heating at one level, summed over waves.
+    real(kind_phys) :: dttke_lev
 
     ! saturation factor. Defaults to 2.0
     ! unless overidden by satfac_in
     real(kind_phys) :: satfac
 
     logical :: lapply_effgw, do_vertical_diffusion
-
-    ! LU decomposition.
-    type(TriDiagDecomp) :: decomp
 
     !------------------------------------------------------------------------
 
@@ -442,22 +556,26 @@ contains
       lapply_effgw = .TRUE.
     end if
 
-    ! Lowest levels that loops need to iterate over.
-    kbot_tend = maxval(tend_level)
-    kbot_src = maxval(src_level)
-
     ! Initialize gravity wave drag tendencies to zero.
-
-    utgw = 0._kind_phys
-    vtgw = 0._kind_phys
-
-    gwut = 0._kind_phys
-
-    dttke = 0._kind_phys
-    ttgw = 0._kind_phys
-
-    dttdf = 0._kind_phys
-    qtgw = 0._kind_phys
+    do k = 1, size(utgw, 2)
+      utgw(icol, k) = 0._kind_phys
+      vtgw(icol, k) = 0._kind_phys
+    end do
+    do l = -ngwv, ngwv
+      do k = 1, size(gwut, 2)
+        gwut(icol, k, l) = 0._kind_phys
+      end do
+    end do
+    do k = 1, size(dttke, 2)
+      dttke(icol, k) = 0._kind_phys
+      ttgw(icol, k) = 0._kind_phys
+      dttdf(icol, k) = 0._kind_phys
+    end do
+    do m = 1, size(qtgw, 3)
+      do k = 1, size(qtgw, 2)
+        qtgw(icol, k, m) = 0._kind_phys
+      end do
+    end do
 
     ! Workaround floating point exception issues on Intel by initializing
     ! everything that's first set in a where block.
@@ -478,108 +596,87 @@ contains
 
       ! Determine the diffusivity for each column.
 
-      d = dback + kvtt(:, k)
+      d = dback + kvtt(icol, k)
 
-      do l = -band%ngwv, band%ngwv
+      do l = -ngwv, ngwv
 
         ! Determine the absolute value of the saturation stress.
         ! Define critical levels where the sign of (u-c) changes between
         ! interfaces.
-        ubmc = ubi(:, k) - c(:, l)
+        ubmc = ubi(icol, k) - c(icol, l)
 
         tausat = 0.0_kind_phys
 
-        if (present(kwvrdg)) then
-          where (src_level >= k)
-            ! Test to see if u-c has the same sign here as the level below.
-            where (ubmc > 0.0_kind_phys .eqv. ubi(:, k + 1) > c(:, l))
-              tausat = abs(kwvrdg*rhoi(:, k)*ubmc**3/ &
-                           (satfac*ni(:, k)))
-            end where
-          end where
-        else
-          where (src_level >= k)
-            ! Test to see if u-c has the same sign here as the level below.
-            where (ubmc > 0.0_kind_phys .eqv. ubi(:, k + 1) > c(:, l))
-              tausat = abs(band%effkwv*rhoi(:, k)*ubmc**3/ &
-                           (satfac*ni(:, k)))
-            end where
-          end where
-        end if
+        if (src_level(icol) >= k) then
+          ! Test to see if u-c has the same sign here as the level below.
+          if (ubmc > 0.0_kind_phys .eqv. ubi(icol, k + 1) > c(icol, l)) then
+            if (present(kwvrdg)) then
+              tausat = abs(kwvrdg(icol)*rhoi(icol, k)*ubmc**3/ &
+                           (satfac*ni(icol, k)))
+            else
+              tausat = abs(effkwv*rhoi(icol, k)*ubmc**3/ &
+                           (satfac*ni(icol, k)))
+            end if
+          end if
 
-        if (present(ro_adjust)) then
-          where (src_level >= k)
-            tausat = tausat*sqrt(ro_adjust(:, l, k))
-          end where
-        end if
+          if (present(ro_adjust)) then
+            tausat = tausat*sqrt(ro_adjust(icol, l, k))
+          end if
 
-        if (present(kwvrdg)) then
-          where (src_level >= k)
-            ! Compute stress for each wave. The stress at this level is the
-            ! min of the saturation stress and the stress at the level below
-            ! reduced by damping. The sign of the stress must be the same as
-            ! at the level below.
+          ! Compute stress for each wave. The stress at this level is the
+          ! min of the saturation stress and the stress at the level below
+          ! reduced by damping. The sign of the stress must be the same as
+          ! at the level below.
 
-            ubmc2 = max(ubmc**2, ubmc2mn)
-            mi = ni(:, k)/(2._kind_phys*kwvrdg*ubmc2)* &  ! Is this 2._kind_phys related to satfac?
-                 (alpha(k) + ni(:, k)**2/ubmc2*d)
-            wrk = -2._kind_phys*mi*rog*t(:, k)*(piln(:, k + 1) - piln(:, k))
+          ubmc2 = max(ubmc**2, ubmc2mn)
+          if (present(kwvrdg)) then
+            mi = ni(icol, k)/(2._kind_phys*kwvrdg(icol)*ubmc2)* &  ! Is this 2._kind_phys related to satfac?
+                 (alpha(k) + ni(icol, k)**2/ubmc2*d)
+            wrk = -2._kind_phys*mi*rog*t(icol, k)*(piln(icol, k + 1) - piln(icol, k))
 
-            taudmp = tau(:, l, k + 1)
+            taudmp = tau(icol, l, k + 1)
+          else
+            mi = ni(icol, k)/(2._kind_phys*kwv*ubmc2)* &
+                 (alpha(k) + ni(icol, k)**2/ubmc2*d)
+            wrk = -2._kind_phys*mi*rog*t(icol, k)*(piln(icol, k + 1) - piln(icol, k))
 
-            ! For some reason, PGI 14.1 loses bit-for-bit reproducibility if
-            ! we limit tau, so instead limit the arrays used to set it.
-            where (tausat <= taumin) tausat = 0._kind_phys
-            where (taudmp <= taumin) taudmp = 0._kind_phys
+            taudmp = tau(icol, l, k + 1)*exp(wrk)
+          end if
 
-            tau(:, l, k) = min(taudmp, tausat)
-          end where
+          ! For some reason, PGI 14.1 loses bit-for-bit reproducibility if
+          ! we limit tau, so instead limit the arrays used to set it.
+          if (tausat <= taumin) tausat = 0._kind_phys
+          if (taudmp <= taumin) taudmp = 0._kind_phys
 
-        else
-
-          where (src_level >= k)
-
-            ! Compute stress for each wave. The stress at this level is the
-            ! min of the saturation stress and the stress at the level below
-            ! reduced by damping. The sign of the stress must be the same as
-            ! at the level below.
-
-            ubmc2 = max(ubmc**2, ubmc2mn)
-            mi = ni(:, k)/(2._kind_phys*band%kwv*ubmc2)* &
-                 (alpha(k) + ni(:, k)**2/ubmc2*d)
-            wrk = -2._kind_phys*mi*rog*t(:, k)*(piln(:, k + 1) - piln(:, k))
-
-            taudmp = tau(:, l, k + 1)*exp(wrk)
-
-            ! For some reason, PGI 14.1 loses bit-for-bit reproducibility if
-            ! we limit tau, so instead limit the arrays used to set it.
-            where (tausat <= taumin) tausat = 0._kind_phys
-            where (taudmp <= taumin) taudmp = 0._kind_phys
-
-            tau(:, l, k) = min(taudmp, tausat)
-          end where
+          tau(icol, l, k) = min(taudmp, tausat)
         end if
 
       end do
     end do
 
     ! Force tau at the top of the model to zero, if requested.
-    if (tau_0_ubc) tau(:, :, ktop) = 0._kind_phys
+    if (tau_0_ubc) then
+      do l = -ngwv, ngwv
+        tau(icol, l, ktop) = 0._kind_phys
+      end do
+    end if
 
     ! Write out pre-adjustment tau profile for diagnostc purposes.
     ! Current implementation only makes sense for orographic waves.
     ! Fix later.
-    if (PRESENT(tau_diag)) then
-      tau_diag(:, :) = tau(:, 0, :)
+    if (present(tau_diag)) then
+      do k = 1, size(tau_diag, 2)
+        tau_diag(icol, k) = tau(icol, 0, k)
+      end do
     end if
 
     ! Apply efficiency to completed stress profile.
     if (lapply_effgw) then
       do k = ktop, kbot_tend + 1
-        do l = -band%ngwv, band%ngwv
-          where (k - 1 <= tend_level)
-            tau(:, l, k) = tau(:, l, k)*effgw
-          end where
+        do l = -ngwv, ngwv
+          if (k - 1 <= tend_level(icol)) then
+            tau(icol, l, k) = tau(icol, l, k)*effgw(icol)
+          end if
         end do
       end do
     end if
@@ -592,32 +689,33 @@ contains
     do k = ktop, kbot_tend
 
       ! Accumulate the mean wind tendency over wavenumber.
-      ubt(:, k) = 0.0_kind_phys
+      ubt = 0.0_kind_phys
 
-      do l = -band%ngwv, band%ngwv    ! loop over wave
+      do l = -ngwv, ngwv    ! loop over wave
 
         ! Determine the wind tendency, including excess stress carried down
         ! from above.
-        ubtl = gravit*(tau(:, l, k + 1) - tau(:, l, k))*p%rdel(:, k)
+        ubtl = gravit*(tau(icol, l, k + 1) - tau(icol, l, k))*rdel(icol, k)
 
         ! Apply first tendency limit to maintain numerical stability.
         ! Enforce du/dt < |c-u|/dt  so u-c cannot change sign
         !    (u^n+1 = u^n + du/dt * dt)
         ! The limiter is somewhat stricter, so that we don't come anywhere
         ! near reversing c-u.
-        ubtl = min(ubtl, umcfac*abs(c(:, l) - ubm(:, k))/dt)
+        ubtl = min(ubtl, umcfac*abs(c(icol, l) - ubm(icol, k))/dt)
 
         if (.not. lapply_effgw) ubtl = min(ubtl, tndmax)
 
-        where (k <= tend_level)
+        if (k <= tend_level(icol)) then
 
           ! Save tendency for each wave (for later computation of kzz).
           ! sign function returns magnitude of ubtl with sign of c-ubm
           ! Renders ubt/ubm check for mountain waves unecessary
-          gwut(:, k, l) = sign(ubtl, c(:, l) - ubm(:, k))
-          ubt(:, k) = ubt(:, k) + gwut(:, k, l)
+          gwut_lev = sign(ubtl, c(icol, l) - ubm(icol, k))
+          gwut(icol, k, l) = gwut_lev
+          ubt = ubt + gwut_lev
 
-        end where
+        end if
 
       end do
 
@@ -627,18 +725,18 @@ contains
         ! permitted.
         ! This can only happen above tend_level, so don't bother checking the
         ! level explicitly.
-        where (abs(ubt(:, k)) > tndmax)
-          ubt_lim_ratio = tndmax/abs(ubt(:, k))
-          ubt(:, k) = ubt_lim_ratio*ubt(:, k)
-        elsewhere
+        if (abs(ubt) > tndmax) then
+          ubt_lim_ratio = tndmax/abs(ubt)
+          ubt = ubt_lim_ratio*ubt
+        else
           ubt_lim_ratio = 1._kind_phys
-        end where
+        end if
       else
         ubt_lim_ratio = 1._kind_phys
       end if
 
-      do l = -band%ngwv, band%ngwv
-        gwut(:, k, l) = ubt_lim_ratio*gwut(:, k, l)
+      do l = -ngwv, ngwv
+        gwut_lev = ubt_lim_ratio*gwut(icol, k, l)
         ! Redetermine the effective stress on the interface below from the
         ! wind tendency. If the wind tendency was limited above, then the
         ! new stress will be smaller than the old stress, causing stress
@@ -648,24 +746,27 @@ contains
         ! Protection on SMALL gwut to prevent floating point
         ! issues.
         !--------------------------------------------------
-        where (abs(gwut(:, k, l)) < 1.e-15_kind_phys)
-          gwut(:, k, l) = 0._kind_phys
-        end where
+        if (abs(gwut_lev) < 1.e-15_kind_phys) then
+          gwut_lev = 0._kind_phys
+        end if
+        gwut(icol, k, l) = gwut_lev
 
-        where (k <= tend_level)
-          tau(:, l, k + 1) = tau(:, l, k) + &
-                             abs(gwut(:, k, l))*p%del(:, k)/gravit
-        end where
+        if (k <= tend_level(icol)) then
+          tau(icol, l, k + 1) = tau(icol, l, k) + &
+                                abs(gwut_lev)*del(icol, k)/gravit
+        end if
       end do
 
       ! Project the mean wind tendency onto the components.
-      where (k <= tend_level)
-        utgw(:, k) = ubt(:, k)*xv
-        vtgw(:, k) = ubt(:, k)*yv
-      end where
+      utgw_lev = utgw(icol, k)
+      vtgw_lev = vtgw(icol, k)
+      if (k <= tend_level(icol)) then
+        utgw_lev = ubt*xv(icol)
+        vtgw_lev = ubt*yv(icol)
+      end if
 
-      utgw(:, k) = utgw(:, k)*vramp(k)
-      vtgw(:, k) = vtgw(:, k)*vramp(k)
+      utgw(icol, k) = utgw_lev*vramp(k)
+      vtgw(icol, k) = vtgw_lev*vramp(k)
 
       ! End of level loop.
     end do
@@ -676,18 +777,18 @@ contains
     !==========================================
     if (.not. (lapply_effgw)) then
       do k = ktop, kbot_tend + 1
-        do l = -band%ngwv, band%ngwv
-          where (k - 1 <= tend_level)
-            tau(:, l, k) = tau(:, l, k)*effgw
-          end where
+        do l = -ngwv, ngwv
+          if (k - 1 <= tend_level(icol)) then
+            tau(icol, l, k) = tau(icol, l, k)*effgw(icol)
+          end if
         end do
       end do
       do k = ktop, kbot_tend
-        do l = -band%ngwv, band%ngwv
-          gwut(:, k, l) = gwut(:, k, l)*effgw
+        do l = -ngwv, ngwv
+          gwut(icol, k, l) = gwut(icol, k, l)*effgw(icol)
         end do
-        utgw(:, k) = utgw(:, k)*effgw
-        vtgw(:, k) = vtgw(:, k)*effgw
+        utgw(icol, k) = utgw(icol, k)*effgw(icol)
+        vtgw(icol, k) = vtgw(icol, k)*effgw(icol)
       end do
     end if
     !===========================================
@@ -696,41 +797,43 @@ contains
 
       ! Calculate effective diffusivity and LU decomposition for the
       ! vertical diffusion solver.
-      call gw_ediff(ncol, pver, pverp, band%ngwv, kbot_tend, ktop, tend_level, &
-                    gwut, ubm, nm, rhoi, dt, prndl, gravit, p, c, vramp, &
-                    egwdffi, decomp, ro_adjust=ro_adjust)
+      call gw_ediff_column(icol, ngwv, kbot_tend, ktop, tend_level, &
+                           gwut, ubm, nm, rhoi, dt, prndl, gravit, &
+                           del, rdel, rdst, c, vramp, &
+                           egwdffi, egwdffm, dpidz_sq, ca, ze, dnom, ro_adjust=ro_adjust)
 
       ! Calculate tendency on each constituent.
       do m = 1, size(q, 3)
 
-        call gw_diff_tend(ncol, pver, kbot_tend, ktop, q(:, :, m), &
-                          dt, decomp, qtgw(:, :, m))
+        call gw_diff_tend_column_3d(icol, kbot_tend, ktop, m, q, dt, ca, ze, dnom, &
+                                    qtgw, qwork)
 
       end do
 
       ! Calculate tendency from diffusing dry static energy (dttdf).
-      call gw_diff_tend(ncol, pver, kbot_tend, ktop, dse, dt, decomp, dttdf)
+      call gw_diff_tend_column(icol, kbot_tend, ktop, dse, dt, ca, ze, dnom, dttdf, qwork)
 
     end if
 
     ! Evaluate second temperature tendency term: Conversion of kinetic
-    ! energy into thermal.
-    do l = -band%ngwv, band%ngwv
-      do k = ktop, kbot_tend
-        dttke(:, k) = dttke(:, k) - (ubm(:, k) - c(:, l))*gwut(:, k, l)
-      end do
-    end do
-
-    ttgw = dttke + dttdf
-
+    ! energy into thermal (summed over waves in wave order, as before).
     do k = ktop, kbot_tend
-      ttgw(:, k) = ttgw(:, k)*vramp(k)
+      dttke_lev = dttke(icol, k)
+      do l = -ngwv, ngwv
+        dttke_lev = dttke_lev - (ubm(icol, k) - c(icol, l))*gwut(icol, k, l)
+      end do
+      dttke(icol, k) = dttke_lev
     end do
 
-    ! Deallocate decomp.
-    call decomp%finalize()
+    do k = 1, size(ttgw, 2)
+      if (k >= ktop .and. k <= kbot_tend) then
+        ttgw(icol, k) = (dttke(icol, k) + dttdf(icol, k))*vramp(k)
+      else
+        ttgw(icol, k) = dttke(icol, k) + dttdf(icol, k)
+      end if
+    end do
 
-  end subroutine gw_drag_prof
+  end subroutine gw_drag_prof_column
 
 !==========================================================================
 
@@ -879,7 +982,8 @@ contains
 
   end subroutine momentum_fixer
 
-  ! Calculate the change in total energy from tendencies up to this point.
+  ! Calculate the change in total energy from tendencies up to this point,
+  ! for all columns (host loop over energy_change_column).
   subroutine energy_change(dt, p, u, v, dudt, dvdt, dsdt, de)
 
     use coords_1d, only: coords1d
@@ -897,18 +1001,49 @@ contains
     ! Change in energy.
     real(kind_phys), intent(out) :: de(:)
 
-    ! Level index.
-    integer :: k
+    ! Column index.
+    integer :: i
 
-    ! Net gain/loss of total energy in the column.
-    de = 0.0_kind_phys
-    do k = 1, pver
-      de = de + p%del(:, k)/gravit*(dsdt(:, k) + &
-                                    dudt(:, k)*(u(:, k) + dudt(:, k)*0.5_kind_phys*dt) + &
-                                    dvdt(:, k)*(v(:, k) + dvdt(:, k)*0.5_kind_phys*dt))
+    do i = 1, size(de)
+      call energy_change_column(i, pver, dt, p%del, u, v, dudt, dvdt, dsdt, de)
     end do
 
   end subroutine energy_change
+
+  ! Calculate the change in total energy from tendencies up to this point,
+  ! for column icol (levels summed in order).
+  subroutine energy_change_column(icol, nlev, dt, del, u, v, dudt, dvdt, dsdt, de)
+    !$acc routine seq
+
+    ! Column index and number of levels.
+    integer, intent(in) :: icol, nlev
+    ! Time step.
+    real(kind_phys), intent(in) :: dt
+    ! Layer thickness (Coords1D's del) [Pa].
+    real(kind_phys), intent(in) :: del(:, :)
+    ! Winds at start of time step.
+    real(kind_phys), intent(in) :: u(:, :), v(:, :)
+    ! Wind tendencies.
+    real(kind_phys), intent(in) :: dudt(:, :), dvdt(:, :)
+    ! Heating tendency.
+    real(kind_phys), intent(in) :: dsdt(:, :)
+    ! Change in energy.
+    real(kind_phys), intent(inout) :: de(:)
+
+    ! Level index.
+    integer :: k
+    ! Net gain/loss of total energy in the column.
+    real(kind_phys) :: de_col
+
+    de_col = 0.0_kind_phys
+    do k = 1, nlev
+      de_col = de_col + del(icol, k)/gravit*(dsdt(icol, k) + &
+                                             dudt(icol, k)*(u(icol, k) + dudt(icol, k)*0.5_kind_phys*dt) + &
+                                             dvdt(icol, k)*(v(icol, k) + dvdt(icol, k)*0.5_kind_phys*dt))
+    end do
+    de(icol) = de_col
+
+  end subroutine energy_change_column
 
   ! Subtract change in energy from the heating tendency in the levels below
   ! the gravity wave region.

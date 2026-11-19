@@ -63,7 +63,7 @@ contains
              dt, &
              rair, &
              cpairv, &
-             p, vramp, &
+             pint, vramp, &
              piln, rhoi, nm, ni, &
              effgw_oro, gw_lndscl_sgh, gw_oro_south_fac, gw_apply_tndmax, &
              landfrac, &
@@ -79,9 +79,8 @@ contains
              tau0x, tau0y, taua, &
              errmsg, errflg)
 
-    use coords_1d, only: coords1d
-    use gw_utils, only: get_unit_vector, dot_2d, midpoint_interp
-    use gw_common, only: gw_drag_prof, energy_change
+    use gw_common, only: gw_drag_prof_column, energy_change_column
+    use atmos_phys_fin_vol_solver, only: fin_vol_coords_column
 
     integer,            intent(in)                :: ncol
     integer,            intent(in)                :: pver
@@ -89,7 +88,7 @@ contains
     real(kind_phys),    intent(in)                :: dt                       ! Physics timestep [s]
     real(kind_phys),    intent(in)                :: rair                     ! Gas constant for dry air [J kg-1 K-1]
     real(kind_phys),    intent(in)                :: cpairv(:,:)              ! Specific heat of dry air at constant pressure [J kg-1 K-1]
-    type(coords1d),     intent(in)                :: p                        ! Pressure coordinates [Pa]
+    real(kind_phys),    intent(in)                :: pint(:, :)               ! Air pressure at interfaces [Pa]
     real(kind_phys),    intent(in)                :: vramp(:)                 ! Gravity wave drag tapering coefficients [1]
     real(kind_phys),    intent(in)                :: piln(:, :)               ! Natural log of pressure at interfaces [ln(Pa)]
     real(kind_phys),    intent(in)                :: rhoi(:, :)               ! Density at interfaces [kg m-3]
@@ -135,15 +134,12 @@ contains
     character(len=512), intent(out)               :: errmsg
     integer,            intent(out)               :: errflg
 
-    integer :: i, k, m
+    integer :: i, k, l, m
 
     ! Wavenumber fields
     real(kind_phys) :: tau(ncol, -band_oro%ngwv:band_oro%ngwv, pver+1)
     real(kind_phys) :: gwut(ncol, pver, -band_oro%ngwv:band_oro%ngwv)
     real(kind_phys) :: phase_speeds(ncol, -band_oro%ngwv:band_oro%ngwv)
-
-    ! Scaled sgh when gw_lndscl_sgh
-    real(kind_phys) :: sgh_local(ncol)
 
     real(kind_phys) :: effgw(ncol)
 
@@ -152,40 +148,80 @@ contains
     ! Surface streamline displacement height (2*sgh).
     real(kind_phys) :: hdsp(ncol)
 
-    ! Max orographic standard deviation to use.
-    real(kind_phys) :: sghmax
-
-    ! c=0 stress from orography.
-    real(kind_phys) :: tauoro(ncol)
-
-    ! Averages over source region.
-    real(kind_phys) :: nsrc(ncol) ! B-V frequency.
-    real(kind_phys) :: rsrc(ncol) ! Density.
-    real(kind_phys) :: usrc(ncol) ! Zonal wind.
-    real(kind_phys) :: vsrc(ncol) ! Meridional wind.
-
-    ! Difference in interface pressure across source region.
-    real(kind_phys) :: dpsrc(ncol)
-
     ! Energy change used by fixer.
     real(kind_phys) :: de(ncol)
+
+    ! Pressure coordinates per column (Coords1D(pint)'s mid, del, rdel, rdst).
+    real(kind_phys) :: mid(ncol, pver), del(ncol, pver), rdel(ncol, pver)
+    real(kind_phys) :: rdst(ncol, pver-1)
+
+    ! Whether any column extends its source region at level k.
+    logical :: anyc(pver)
+    logical :: found
+
+    ! Work arrays for gw_drag_prof_column.
+    real(kind_phys) :: egwdffm(ncol, pver), dpidz_sq(ncol, pver+1)
+    real(kind_phys) :: ca(ncol, pver), ze(ncol, pver), dnom(ncol, pver)
+    real(kind_phys) :: qwork(ncol, pver)
+
+    ! Band scalars (band_oro stays on the host).
+    integer         :: ngwv
+    real(kind_phys) :: kwv, effkwv, fcrit2
+
+    ! Lowest source and tendency levels over all columns.
+    integer :: kbot_src, kbot_tend
+
+    ! Per-column scalars.
+    integer         :: srcl                  ! Source level.
+    real(kind_phys) :: sgh_local             ! Scaled sgh when gw_lndscl_sgh.
+    real(kind_phys) :: sghmax                ! Max orographic standard deviation to use.
+    real(kind_phys) :: tauoro                ! c=0 stress from orography.
+    real(kind_phys) :: tauzero               ! Zero stress (scaled like tau).
+    real(kind_phys) :: nsrc, rsrc, usrc, vsrc  ! Averages over source region: B-V frequency, density, winds.
+    real(kind_phys) :: dpsrc                 ! Difference in interface pressure across source region.
+    real(kind_phys) :: mag, xvi, yvi         ! Source wind magnitude and unit vector.
+    real(kind_phys) :: ubm_k, ubm_km1        ! Wind projection at midpoints k, k-1.
+    real(kind_phys) :: tg                    ! Heating tendency at one point.
 
     errmsg = ''
     errflg = 0
 
-    ! Scale sgh by land fraction?
-    if (gw_lndscl_sgh) then
-      where (landfrac(:ncol) >= epsilon(1._kind_phys))
-        effgw = effgw_oro * landfrac(:ncol)
-        sgh_local = sgh(:ncol) / sqrt(landfrac(:ncol))
-      elsewhere
-        effgw = 0._kind_phys
-        sgh_local = 0._kind_phys
-      end where
-    else
-      effgw(:ncol) = effgw_oro
-      sgh_local(:ncol) = sgh(:ncol)
-    endif
+    ngwv   = band_oro%ngwv
+    kwv    = band_oro%kwv
+    effkwv = band_oro%effkwv
+    fcrit2 = band_oro%fcrit2
+
+    ! OpenACC: one data region; per-column kernels (one thread per column,
+    ! levels in order), plus one per-level reduction for the source search.
+    ! The arithmetic per column is that of the former array code; level
+    ! values are kept in scalars and stored once.
+    !$acc data copyin(pint, cpairv, vramp, piln, rhoi, nm, ni, landfrac, lat, &
+    !$acc             u, v, t, q, dse, sgh, zm, kvt_gw) &
+    !$acc      copy(tend_q, tend_u, tend_v, tend_s, egwdffi_tot) &
+    !$acc      copyout(src_level, tend_level, ubm, ubi, xv, yv, utgw, vtgw, ttgw, qtgw, &
+    !$acc              dttdf, dttke, flx_heat, tau0x, tau0y, taua) &
+    !$acc      create(tau, gwut, phase_speeds, effgw, egwdffi, hdsp, de, mid, del, rdel, &
+    !$acc             rdst, anyc, egwdffm, dpidz_sq, ca, ze, dnom, qwork)
+
+    ! Scale sgh by land fraction? Surface streamline displacement height,
+    ! and the pressure coordinates.
+    !$acc parallel loop gang vector private(sgh_local)
+    do i = 1, ncol
+      if (gw_lndscl_sgh) then
+        if (landfrac(i) >= epsilon(1._kind_phys)) then
+          effgw(i) = effgw_oro * landfrac(i)
+          sgh_local = sgh(i) / sqrt(landfrac(i))
+        else
+          effgw(i) = 0._kind_phys
+          sgh_local = 0._kind_phys
+        end if
+      else
+        effgw(i) = effgw_oro
+        sgh_local = sgh(i)
+      endif
+      hdsp(i) = 2.0_kind_phys*sgh_local
+      call fin_vol_coords_column(i, pver, pint, mid, del, rdel, rdst)
+    end do
 
     !--------------------------------------------------------------------------
     ! Average the basic state variables for the wave source over the depth of
@@ -194,135 +230,190 @@ contains
     ! averages over the depth of the atmosphere penterated by the typical
     ! mountain.
     ! Reduces to the bottom midpoint values when sgh=0, such as over ocean.
+    !
+    ! The search walks up from the bottom and stops at the first level where
+    ! no column extends its source region (as the former loop over all
+    ! columns did): anyc(k) records, per level, whether any column does.
     !--------------------------------------------------------------------------
-    hdsp(:) = 2.0_kind_phys*sgh_local(:)
-
-    k = pver
-    src_level = k - 1
-    rsrc = p%mid(:, k)/(rair*t(:, k))*p%del(:, k)
-    usrc = u(:, k)*p%del(:, k)
-    vsrc = v(:, k)*p%del(:, k)
-    nsrc = nm(:, k)*p%del(:, k)
-
-    do k = pver - 1, 1, -1
+    !$acc parallel loop gang private(found)
+    do k = 1, pver - 1
+      found = .false.
+      !$acc loop vector reduction(.or.:found)
       do i = 1, ncol
+        found = found .or. (hdsp(i) > sqrt(zm(i, k)*zm(i, k + 1)))
+      end do
+      anyc(k) = found
+    end do
+
+    kbot_src = -huge(1)
+    !$acc parallel loop gang vector reduction(max:kbot_src) &
+    !$acc   private(k, l, srcl, rsrc, usrc, vsrc, nsrc, dpsrc, mag, xvi, yvi, &
+    !$acc           ubm_k, ubm_km1, sghmax, tauoro, tauzero)
+    do i = 1, ncol
+      k = pver
+      srcl = k - 1
+      rsrc = mid(i, k)/(rair*t(i, k))*del(i, k)
+      usrc = u(i, k)*del(i, k)
+      vsrc = v(i, k)*del(i, k)
+      nsrc = nm(i, k)*del(i, k)
+
+      !$acc loop seq
+      do k = pver - 1, 1, -1
         if (hdsp(i) > sqrt(zm(i, k)*zm(i, k + 1))) then
-          src_level(i) = k - 1
-          rsrc(i) = rsrc(i) + &
-                    p%mid(i, k)/(rair*t(i, k))*p%del(i, k)
-          usrc(i) = usrc(i) + u(i, k)*p%del(i, k)
-          vsrc(i) = vsrc(i) + v(i, k)*p%del(i, k)
-          nsrc(i) = nsrc(i) + nm(i, k)*p%del(i, k)
+          srcl = k - 1
+          rsrc = rsrc + &
+                 mid(i, k)/(rair*t(i, k))*del(i, k)
+          usrc = usrc + u(i, k)*del(i, k)
+          vsrc = vsrc + v(i, k)*del(i, k)
+          nsrc = nsrc + nm(i, k)*del(i, k)
         end if
+        ! Break the loop when all source levels found.
+        if (.not. anyc(k)) exit
       end do
-      ! Break the loop when all source levels found.
-      if (all(src_level >= k)) exit
-    end do
 
-    do i = 1, ncol
-      dpsrc(i) = p%ifc(i, pver + 1) - p%ifc(i, src_level(i) + 1)
-    end do
+      dpsrc = pint(i, pver + 1) - pint(i, srcl + 1)
 
-    rsrc = rsrc/dpsrc
-    usrc = usrc/dpsrc
-    vsrc = vsrc/dpsrc
-    nsrc = nsrc/dpsrc
+      rsrc = rsrc/dpsrc
+      usrc = usrc/dpsrc
+      vsrc = vsrc/dpsrc
+      nsrc = nsrc/dpsrc
 
-    ! Get the unit vector components and magnitude at the surface.
-    call get_unit_vector(usrc, vsrc, xv, yv, ubi(:, pver + 1))
-
-    ! Project the local wind at midpoints onto the source wind.
-    do k = 1, pver
-      ubm(:, k) = dot_2d(u(:, k), v(:, k), xv, yv)
-    end do
-
-    ! Compute the interface wind projection by averaging the midpoint winds.
-    ! Use the top level wind at the top interface.
-    ubi(:, 1) = ubm(:, 1)
-
-    ubi(:, 2:pver) = midpoint_interp(ubm)
-
-    ! Determine the orographic c=0 source term following McFarlane (1987).
-    ! Set the source top interface index to pver, if the orographic term is
-    ! zero.
-    do i = 1, ncol
-      if ((ubi(i, pver + 1) > orovmin) .and. (hdsp(i) > orohmin)) then
-        sghmax = band_oro%fcrit2*(ubi(i, pver + 1)/nsrc(i))**2
-        tauoro(i) = 0.5_kind_phys*band_oro%kwv*min(hdsp(i)**2, sghmax)* &
-                    rsrc(i)*nsrc(i)*ubi(i, pver + 1)
+      ! Get the unit vector components and magnitude at the surface
+      ! (gw_utils' get_unit_vector).
+      mag = sqrt(usrc*usrc + vsrc*vsrc)
+      if (mag > 0._kind_phys) then
+        xvi = usrc/mag
+        yvi = vsrc/mag
       else
-        tauoro(i) = 0._kind_phys
-        src_level(i) = pver
+        xvi = 0._kind_phys
+        yvi = 0._kind_phys
       end if
-    end do
+      xv(i) = xvi
+      yv(i) = yvi
+      ubi(i, pver + 1) = mag
 
-    ! Set the phase speeds and wave numbers in the direction of the source
-    ! wind. Set the source stress magnitude (positive only, note that the
-    ! sign of the stress is the same as (c-u).
-    tau = 0._kind_phys
-    do k = pver, minval(src_level), -1
-      where (src_level <= k) tau(:, 0, k + 1) = tauoro
-    end do
+      ! Project the local wind at midpoints onto the source wind (dot_2d).
+      ! Compute the interface wind projection by averaging the midpoint winds
+      ! (midpoint_interp). Use the top level wind at the top interface.
+      ubm_k = u(i, 1)*xvi + v(i, 1)*yvi
+      ubm(i, 1) = ubm_k
+      ubi(i, 1) = ubm_k
+      !$acc loop seq
+      do k = 2, pver
+        ubm_km1 = ubm_k
+        ubm_k = u(i, k)*xvi + v(i, k)*yvi
+        ubm(i, k) = ubm_k
+        ubi(i, k) = 0.5_kind_phys*(ubm_km1 + ubm_k)
+      end do
 
-    ! Allow wind tendencies all the way to the model bottom.
-    tend_level = pver
+      ! Determine the orographic c=0 source term following McFarlane (1987).
+      ! Set the source top interface index to pver, if the orographic term is
+      ! zero.
+      if ((mag > orovmin) .and. (hdsp(i) > orohmin)) then
+        sghmax = fcrit2*(mag/nsrc)**2
+        tauoro = 0.5_kind_phys*kwv*min(hdsp(i)**2, sghmax)* &
+                 rsrc*nsrc*mag
+      else
+        tauoro = 0._kind_phys
+        srcl = pver
+      end if
+      src_level(i) = srcl
 
-    ! No spectrum; phase speed is just 0.
-    phase_speeds(:,:) = 0._kind_phys
-
-    ! Scale tau in the southern hemisphere.
-    do i = 1, ncol
+      ! Set the phase speeds and wave numbers in the direction of the source
+      ! wind. Set the source stress magnitude (positive only, note that the
+      ! sign of the stress is the same as (c-u). Scale tau in the southern
+      ! hemisphere.
+      tauzero = 0._kind_phys
       if (lat(i) < 0._kind_phys) then
-        tau(i, :, :) = tau(i, :, :)*gw_oro_south_fac
+        tauzero = tauzero*gw_oro_south_fac
+        tauoro = tauoro*gw_oro_south_fac
       end if
+      !$acc loop seq
+      do k = 1, pver + 1
+        !$acc loop seq
+        do l = -ngwv, ngwv
+          if (l == 0 .and. k >= srcl + 1) then
+            tau(i, l, k) = tauoro
+          else
+            tau(i, l, k) = tauzero
+          end if
+        end do
+      end do
+
+      ! Allow wind tendencies all the way to the model bottom.
+      tend_level(i) = pver
+
+      ! No spectrum; phase speed is just 0.
+      !$acc loop seq
+      do l = -ngwv, ngwv
+        phase_speeds(i, l) = 0._kind_phys
+      end do
+
+      kbot_src = max(kbot_src, srcl)
     end do
 
-    ! Solve for the drag profile with orographic sources.
-    call gw_drag_prof(ncol, band_oro, p, src_level, tend_level, dt, &
-                      t, vramp, &
-                      piln, rhoi, nm, ni, ubm, ubi, xv, yv, &
-                      effgw, phase_speeds, kvt_gw, q, dse, tau, utgw, vtgw, &
-                      ttgw, qtgw, egwdffi, gwut, dttdf, dttke, &
-                      lapply_effgw_in=gw_apply_tndmax)
+    ! Lowest tendency level over all columns (tend_level = pver everywhere).
+    kbot_tend = pver
 
-    ! For orographic waves, don't bother with taucd, since there are no
-    ! momentum conservation routines or directional diagnostics.
+    !$acc parallel loop gang vector private(k, m, tg)
+    do i = 1, ncol
+      ! Solve for the drag profile with orographic sources.
+      call gw_drag_prof_column(i, ngwv, kwv, effkwv, kbot_src, kbot_tend, &
+                               src_level, tend_level, dt, &
+                               t, vramp, piln, rhoi, nm, ni, ubm, ubi, xv, yv, &
+                               effgw, phase_speeds, kvt_gw, q, dse, del, rdel, rdst, &
+                               tau, utgw, vtgw, ttgw, qtgw, egwdffi, gwut, dttdf, dttke, &
+                               egwdffm, dpidz_sq, ca, ze, dnom, qwork, &
+                               lapply_effgw_in=gw_apply_tndmax)
 
-    ! Add the diffusion coefficients
-    do k = 1, pver + 1
-      egwdffi_tot(:, k) = egwdffi_tot(:, k) + egwdffi(:, k)
-    end do
+      ! For orographic waves, don't bother with taucd, since there are no
+      ! momentum conservation routines or directional diagnostics.
 
-    ! Add the orographic tendencies to the spectrum tendencies.
-    ! Don't calculate fixers, since we are too close to the ground to
-    ! spread momentum/energy differences across low layers.
-    do k = 1, pver
-      tend_u(:ncol, k) = tend_u(:ncol, k) + utgw(:, k)
-      tend_v(:ncol, k) = tend_v(:ncol, k) + vtgw(:, k)
-      tend_s(:ncol, k) = tend_s(:ncol, k) + ttgw(:, k)
-      ! Convert to temperature tendency for output.
-      ttgw(:, k) = ttgw(:, k)/cpairv(:ncol, k)
-    end do
+      ! Add the diffusion coefficients
+      !$acc loop seq
+      do k = 1, pver + 1
+        egwdffi_tot(i, k) = egwdffi_tot(i, k) + egwdffi(i, k)
+      end do
 
-    ! Calculate energy change for output to CAM's energy checker.
-    ! This is sort of cheating; we don't have a good a priori idea of the
-    ! energy coming from surface stress, so we just integrate what we and
-    ! actually have so far and OVERWRITE flx_heat with that.
-    call energy_change(dt, p, u, v, tend_u(:ncol, :), &
-                       tend_v(:ncol, :), tend_s(:ncol, :), de)
-    flx_heat(:ncol) = de            ! this is the only gw scheme that has flx_heat as out and overwritten directly.
-
-    ! Store constituents tendencies
-    do m = 1, pcnst
+      ! Add the orographic tendencies to the spectrum tendencies.
+      ! Don't calculate fixers, since we are too close to the ground to
+      ! spread momentum/energy differences across low layers.
+      !$acc loop seq
       do k = 1, pver
-         tend_q(:ncol,k,m) = tend_q(:ncol,k,m) + qtgw(:ncol,k,m)
+        tend_u(i, k) = tend_u(i, k) + utgw(i, k)
+        tend_v(i, k) = tend_v(i, k) + vtgw(i, k)
+        tg = ttgw(i, k)
+        tend_s(i, k) = tend_s(i, k) + tg
+        ! Convert to temperature tendency for output.
+        ttgw(i, k) = tg/cpairv(i, k)
+      end do
+
+      ! Calculate energy change for output to CAM's energy checker.
+      ! This is sort of cheating; we don't have a good a priori idea of the
+      ! energy coming from surface stress, so we just integrate what we and
+      ! actually have so far and OVERWRITE flx_heat with that.
+      call energy_change_column(i, pver, dt, del, u, v, tend_u, tend_v, tend_s, de)
+      flx_heat(i) = de(i)            ! this is the only gw scheme that has flx_heat as out and overwritten directly.
+
+      ! Store constituents tendencies
+      !$acc loop seq
+      do m = 1, pcnst
+        !$acc loop seq
+        do k = 1, pver
+           tend_q(i,k,m) = tend_q(i,k,m) + qtgw(i,k,m)
+        end do
+      end do
+
+      ! Compute surface stresses for diagnostic
+      tau0x(i) = tau(i,0,pver+1) * xv(i)
+      tau0y(i) = tau(i,0,pver+1) * yv(i)
+      !$acc loop seq
+      do k = 1, pver + 1
+        taua(i, k) = tau(i,0,k)
       end do
     end do
 
-    ! Compute surface stresses for diagnostic
-    tau0x(:ncol) = tau(:ncol,0,pver+1) * xv(:ncol)
-    tau0y(:ncol) = tau(:ncol,0,pver+1) * yv(:ncol)
-    taua(:ncol, :pver+1) = tau(:ncol,0,:pver+1)
+    !$acc end data
 
   end subroutine gravity_wave_drag_orographic_run
 

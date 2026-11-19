@@ -35,6 +35,9 @@ gravity_wave_drag_frontogenesis_diagnostics   = ccpp_scheme_ref("gravity_wave_dr
 gravity_wave_drag_ridge                       = ccpp_scheme_ref("gravity_wave_drag_ridge")
 gravity_wave_drag_ridge_beta                  = ccpp_scheme_ref("gravity_wave_drag_ridge_beta")
 gravity_wave_drag_ridge_beta_diagnostics      = ccpp_scheme_ref("gravity_wave_drag_ridge_beta_diagnostics")
+# The pressure-coordinate object (coords1d) the CAM7 sources read; the
+# orographic source and prepare_profiles work from pint.
+gravity_wave_drag_pressure_coordinates        = ccpp_scheme_ref("gravity_wave_drag_pressure_coordinates")
 
 
 @ccpp_composite
@@ -69,8 +72,12 @@ def ridge_gravity_waves():
 
 
 moving_mountain = Parameterization(name="moving mountain gravity waves",
-                                   run=moving_mountain_gravity_waves)
+                                   run=moving_mountain_gravity_waves,
+                                   inputs=gravity_wave_drag_pressure_coordinates)
 deep_convection = Parameterization(name="deep convective gravity waves",
-                                   run=deep_convection_gravity_waves)
-frontogenesis = Parameterization(name="frontal gravity waves", run=frontal_gravity_waves)
-ridge = Parameterization(name="ridge gravity waves", run=ridge_gravity_waves)
+                                   run=deep_convection_gravity_waves,
+                                   inputs=gravity_wave_drag_pressure_coordinates)
+frontogenesis = Parameterization(name="frontal gravity waves", run=frontal_gravity_waves,
+                                 inputs=gravity_wave_drag_pressure_coordinates)
+ridge = Parameterization(name="ridge gravity waves", run=ridge_gravity_waves,
+                         inputs=gravity_wave_drag_pressure_coordinates)
