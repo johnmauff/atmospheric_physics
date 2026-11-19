@@ -65,8 +65,10 @@ contains
     errmsg = ''
     errflg = 0
 
+    !$acc data copy(const_q)
     call apply_floor(ix_cldliq, ix_numliq)
     call apply_floor(ix_cldice, ix_numice)
+    !$acc end data
 
   contains
 
@@ -77,6 +79,7 @@ contains
       integer :: i, k
 
       if (ix_mass < 1) return
+      !$acc parallel loop collapse(2) present(const_q)
       do k = 1, pver
          do i = 1, ncol
             if (const_q(i,k,ix_mass) < condensate_min) then

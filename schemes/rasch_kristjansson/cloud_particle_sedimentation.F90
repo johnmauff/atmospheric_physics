@@ -35,6 +35,7 @@ module cloud_particle_sedimentation
   ! tuning parameters for McFarquhar and Heymsfield terminal velocity
   real(kind_phys), parameter :: vice_small = 1._kind_phys    ! ice fall velocity for small concentration [cm s-1]
   real(kind_phys)            :: lbound                       ! lower bound for iciwc
+  !$acc declare create(cldsed_ice_stokes_fac, v40, vslope, lbound)
 
   ! misc
   real(kind_phys), parameter :: um_to_m = 1.e-12_kind_phys
@@ -77,6 +78,7 @@ contains
     ac = 5.4795_kind_phys
     lbound = (-bc + sqrt(bc*bc - 4*ac*cc))/(2*ac)
     lbound = 10._kind_phys**lbound
+    !$acc update device(cldsed_ice_stokes_fac, v40, vslope, lbound)
 
     if(amIRoot) then
       write(iulog,*) 'cloud_particle_sedimentation_init: cldsed_ice_stokes_fac = ', cldsed_ice_stokes_fac
@@ -109,7 +111,7 @@ contains
     liqtend, icetend, wvtend, htend, sfliq, sfice, &
     errmsg, errflg)
     ! To-be-CCPPized dependencies
-    use cloud_optical_properties,     only: reltab, reitab
+    use cloud_optical_properties,     only: rel_point, rei_point
 
     ! Input arguments
     integer,            intent(in)    :: ncol
@@ -151,100 +153,116 @@ contains
     integer,            intent(out)   :: errflg         ! error flag
 
     ! Local variables
-    real(kind_phys)     :: rho(ncol, pver)              ! air density [kg m-3]
+    real(kind_phys)     :: rho                          ! air density [kg m-3]
     real(kind_phys)     :: vfall                        ! settling velocity of cloud particles [m s-1]
     real(kind_phys)     :: icice                        ! in cloud ice water content [kg kg-1]
     real(kind_phys)     :: iciwc                        ! in cloud ice water content [g m-3]
     real(kind_phys)     :: icefac
     real(kind_phys)     :: logiwc
-    real(kind_phys)     :: rei(ncol, pver)              ! effective radius of ice particles [um]
-    real(kind_phys)     :: rel(ncol, pver)              ! effective radius of liquid particles [um]
+    real(kind_phys)     :: rei                          ! effective radius of ice particles [um]
+    real(kind_phys)     :: rel                          ! effective radius of liquid particles [um]
     real(kind_phys)     :: fxliq(ncol, pverp)           ! fluxes at interface, liquid (positive is down) [Pa]
     real(kind_phys)     :: fxice(ncol, pverp)           ! fluxes at interface, ice (positive is down) [Pa]
-    real(kind_phys)     :: cldab(ncol)                  ! cloud in layer above [fraction]
+    real(kind_phys)     :: cldab                        ! cloud in layer above [fraction]
     real(kind_phys)     :: evapliq                      ! evaporation of cloud liquid into environment [kg kg-1 s-1]
     real(kind_phys)     :: evapice                      ! evaporation of cloud ice into environment [kg kg-1 s-1]
     real(kind_phys)     :: cldovrl                      ! cloud overlap factor
     integer             :: i, k
 
+    ! Work arrays of getflx_column (and cfdotmc_column), one column each
+    real(kind_phys)     :: psi(ncol, pverp)             ! integral of phi
+    real(kind_phys)     :: fdot(ncol, pverp)            ! derivative of psi at nodes
+    real(kind_phys)     :: s(ncol, pverp)               ! first divided differences at nodes
+    real(kind_phys)     :: sh(ncol, pverp)              ! first divided differences between nodes
+    real(kind_phys)     :: d(ncol, pverp)               ! second divided differences at nodes
+    real(kind_phys)     :: dh(ncol, pverp)              ! second divided differences between nodes
+    real(kind_phys)     :: e(ncol, pverp)               ! third divided differences at nodes
+    real(kind_phys)     :: eh(ncol, pverp)              ! third divided differences between nodes
+    real(kind_phys)     :: delxh(ncol, pverp)           ! node spacing
+
+    ! cfint2 errors: the last column whose interval was not found (0 if none)
+    logical             :: found
+    integer             :: fail_liq, fail_ice
+
     errmsg = ''
     errflg = 0
+    fail_liq = 0
+    fail_ice = 0
 
-    !--------------------------------------------------
-    ! COMPUTE GRAVITATIONAL SEDIMENTATION VELOCITIES
-    !--------------------------------------------------
-    ! NEED TO BE CAREFUL - VELOCITIES SHOULD BE AT THE *LOWER* INTERFACE
-    ! (THAT IS, FOR K+1), FLUXES ARE ALSO AT THE LOWER INTERFACE (K+1),
-    ! BUT MIXING RATIOS ARE AT THE MIDPOINTS (K)...
-    !
-    ! NOTE THAT PVEL IS ON INTERFACES, WHEREAS VFALL IS FOR THE CELL
-    ! AVERAGES (I.E., MIDPOINTS); ASSUME THE FALL VELOCITY APPLICABLE TO THE
-    ! LOWER INTERFACE (K+1) IS THE SAME AS THAT APPLICABLE FOR THE CELL (V(K))
+    ! One column per thread; levels in order within a column. The unused
+    ! inputs (landfrac, ocnfrac) are in the data clause so they stay device
+    ! arguments.
+    !$acc data copyin(pint, pmid, pdel, t, cloud, icefrac, landfrac, ocnfrac, &
+    !$acc&            cldliq, cldice, snowh, landm) &
+    !$acc&     copyout(pvliq, pvice, liqtend, icetend, wvtend, htend, sfliq, sfice) &
+    !$acc&     create(fxliq, fxice, psi, fdot, s, sh, d, dh, e, eh, delxh)
+    !$acc parallel loop gang vector reduction(max:fail_liq, fail_ice) &
+    !$acc&  private(rho, vfall, icice, iciwc, icefac, logiwc, rei, rel, cldab, &
+    !$acc&          evapliq, evapice, cldovrl, found, k)
+    do i = 1, ncol
 
-    ! LIQUID:
-    ! The fall velocities assume that droplets have a gamma distribution
-    ! with effective radii for land and ocean as assessed by Han et al.;
-    ! see Lawrence and Crutzen (1998) for a derivation.
-    rho(:ncol,:) = pmid(:ncol,:)/(rair*t(:ncol,:))
-    pvliq(:ncol,:) = 0._kind_phys
+      !--------------------------------------------------
+      ! COMPUTE GRAVITATIONAL SEDIMENTATION VELOCITIES
+      !--------------------------------------------------
+      ! NEED TO BE CAREFUL - VELOCITIES SHOULD BE AT THE *LOWER* INTERFACE
+      ! (THAT IS, FOR K+1), FLUXES ARE ALSO AT THE LOWER INTERFACE (K+1),
+      ! BUT MIXING RATIOS ARE AT THE MIDPOINTS (K)...
+      !
+      ! NOTE THAT PVEL IS ON INTERFACES, WHEREAS VFALL IS FOR THE CELL
+      ! AVERAGES (I.E., MIDPOINTS); ASSUME THE FALL VELOCITY APPLICABLE TO THE
+      ! LOWER INTERFACE (K+1) IS THE SAME AS THAT APPLICABLE FOR THE CELL (V(K))
 
-    ! get effective radius of liquid drop (rel)
-    call reltab(ncol=ncol, pver=pver, tmelt=tmelt, t=t(:ncol,:), landfrac=landfrac(:ncol), landm=landm(:ncol), icefrac=icefrac(:ncol), snowh=snowh(:ncol), rel=rel(:ncol,:))
+      ! LIQUID:
+      ! The fall velocities assume that droplets have a gamma distribution
+      ! with effective radii for land and ocean as assessed by Han et al.;
+      ! see Lawrence and Crutzen (1998) for a derivation.
+      ! ICE:
+      ! The fall velocities are based on data from McFarquhar and Heymsfield
+      ! or on Stokes terminal velocity for spheres and the effective radius.
+      pvliq(i, 1) = 0._kind_phys
+      pvice(i, 1) = 0._kind_phys
+      !$acc loop seq
+      do k = 1, pver
+        rho = pmid(i, k)/(rair*t(i, k))
 
-    do k = 1, pver
-      do i = 1, ncol
+        pvliq(i, k + 1) = 0._kind_phys
         if (cloud(i, k) > 0._kind_phys .and. cldliq(i, k) > 0._kind_phys) then
-          if (rel(i, k) < 40._kind_phys) then
-            vfall = 2._kind_phys/9._kind_phys*rhoh2o*gravit*rel(i, k)**2/eta*um_to_m  ! um^2 -> m^2
+          ! effective radius of liquid drop (reltab)
+          rel = rel_point(tmelt, t(i, k), snowh(i), landm(i), icefrac(i))
+          if (rel < 40._kind_phys) then
+            vfall = 2._kind_phys/9._kind_phys*rhoh2o*gravit*rel**2/eta*um_to_m  ! um^2 -> m^2
           else
-            vfall = v40 + vslope*(rel(i, k) - r40)    ! linear above 40 microns
+            vfall = v40 + vslope*(rel - r40)    ! linear above 40 microns
           end if
           ! convert the fall speed to pressure units, but do not apply the traditional
           ! negative convention for pvel.
-          pvliq(i, k + 1) = vfall*rho(i, k)*gravit      ! m s-1 to Pa s-1
+          pvliq(i, k + 1) = vfall*rho*gravit      ! m s-1 to Pa s-1
         end if
-      end do
-    end do
 
-    ! ICE:
-    ! The fall velocities are based on data from McFarquhar and Heymsfield
-    ! or on Stokes terminal velocity for spheres and the effective radius.
-    pvice(:ncol,:) = 0._kind_phys
-
-    if(stokes) then
-      ! stokes terminal velocity < 40 microns
-
-      ! get effective radius (rei)
-      call reitab(ncol=ncol, pver=pver, t=t(:ncol,:), re=rei(:ncol,:))
-
-      do k = 1, pver
-        do i = 1, ncol
-          if (cloud(i, k) > 0._kind_phys .and. cldice(i, k) > 0._kind_phys) then
-            if (rei(i, k) < 40._kind_phys) then
-              vfall = 2._kind_phys/9._kind_phys*rhoh2o*gravit*rei(i, k)**2/eta*um_to_m  ! microns^2 -> m^2
+        pvice(i, k + 1) = 0._kind_phys
+        if (cloud(i, k) > 0._kind_phys .and. cldice(i, k) > 0._kind_phys) then
+          if (stokes) then
+            ! stokes terminal velocity < 40 microns
+            ! effective radius of ice (reitab)
+            rei = rei_point(t(i, k))
+            if (rei < 40._kind_phys) then
+              vfall = 2._kind_phys/9._kind_phys*rhoh2o*gravit*rei**2/eta*um_to_m  ! microns^2 -> m^2
               vfall = vfall*cldsed_ice_stokes_fac
             else
-              vfall = v40 + vslope*(rei(i, k) - r40)      ! linear above 40 microns
+              vfall = v40 + vslope*(rei - r40)      ! linear above 40 microns
             end if
 
             ! convert the fall speed to pressure units, but do not apply the traditional
             ! negative convention for pvel.
-            pvice(i, k + 1) = vfall*rho(i, k)*gravit      ! m s-1 to Pa s-1
-          end if
-        end do
-      end do
-
-    else
-      ! McFarquhar and Heymsfield > icritc
-      do k = 1, pver
-        do i = 1, ncol
-          if (cloud(i, k) > 0._kind_phys .and. cldice(i, k) > 0._kind_phys) then
+            pvice(i, k + 1) = vfall*rho*gravit      ! m s-1 to Pa s-1
+          else
+            ! McFarquhar and Heymsfield > icritc
 
             ! compute the in-cloud ice concentration (kg/kg)
             icice = cldice(i, k)/cloud(i, k)
 
             ! compute the ice water content in g/m3
-            iciwc = icice*rho(i, k)*1.e3_kind_phys
+            iciwc = icice*rho*1.e3_kind_phys
 
             ! set the fall velocity (cm/s) to depend on the ice water content in g/m3,
             if (iciwc > lbound) then ! need this because of log10
@@ -273,58 +291,44 @@ contains
             ! negative convention for pvel.
             pvice(i, k + 1) = vfall &
                               *0.01_kind_phys &      ! cm to meters
-                              *rho(i, k)*gravit      ! m s-1 to Pa s-1
+                              *rho*gravit            ! m s-1 to Pa s-1
           end if
-        end do
+        end if
       end do
-    endif
 
-    !--------------------------------------------------
-    ! APPLY CLOUD PARTICLE GRAVITATIONAL SEDIMENTATION TO CONDENSATE
-    !--------------------------------------------------
-    ! Initialize variables
-    fxliq(:ncol, :)   = 0._kind_phys ! flux at interfaces (liquid)
-    fxice(:ncol, :)   = 0._kind_phys ! flux at interfaces (ice)
-    liqtend(:ncol, :) = 0._kind_phys ! condensate tend (liquid)
-    icetend(:ncol, :) = 0._kind_phys ! condensate tend (ice)
-    wvtend(:ncol, :)  = 0._kind_phys ! environmental moistening
-    htend(:ncol, :)   = 0._kind_phys ! evaporative cooling
-    sfliq(:ncol)      = 0._kind_phys ! condensate sedimentation flux out bot of column (liquid)
-    sfice(:ncol)      = 0._kind_phys ! condensate sedimentation flux out bot of column (ice)
+      !--------------------------------------------------
+      ! APPLY CLOUD PARTICLE GRAVITATIONAL SEDIMENTATION TO CONDENSATE
+      !--------------------------------------------------
+      ! Get fluxes at interior points (getflx sets the boundary fluxes to zero)
+      call getflx_column(i, pver, pverp, pint, cldliq, pvliq, dtime, fxliq, &
+                         psi, fdot, s, sh, d, dh, e, eh, delxh, found)
+      if (.not. found) fail_liq = max(fail_liq, i)
+      call getflx_column(i, pver, pverp, pint, cldice, pvice, dtime, fxice, &
+                         psi, fdot, s, sh, d, dh, e, eh, delxh, found)
+      if (.not. found) fail_ice = max(fail_ice, i)
 
-    ! Get fluxes at interior points
-    call getflx(ncol, pver, pverp, pint, cldliq, pvliq, dtime, fxliq, errmsg, errflg)
-    if(errflg /= 0) then
-      return
-    endif
-    call getflx(ncol, pver, pverp, pint, cldice, pvice, dtime, fxice, errmsg, errflg)
-    if(errflg /= 0) then
-      return
-    endif
-
-    ! Calculate fluxes at boundaries
-    do i = 1, ncol
+      ! Calculate fluxes at boundaries
       fxliq(i, 1) = 0._kind_phys
       fxice(i, 1) = 0._kind_phys
       ! surface flux by upstream scheme
       fxliq(i, pverp) = cldliq(i, pver)*pvliq(i, pverp)*dtime
       fxice(i, pverp) = cldice(i, pver)*pvice(i, pverp)*dtime
-    end do
 
-    ! filter out any negative fluxes from the getflx routine
-    ! (typical fluxes are of order > 1e-3 when clouds are present)
-    do k = 2, pver
-      fxliq(:ncol, k) = max(0._kind_phys, fxliq(:ncol, k))
-      fxice(:ncol, k) = max(0._kind_phys, fxice(:ncol, k))
-    end do
+      ! filter out any negative fluxes from the getflx routine
+      ! (typical fluxes are of order > 1e-3 when clouds are present)
+      !$acc loop seq
+      do k = 2, pver
+        fxliq(i, k) = max(0._kind_phys, fxliq(i, k))
+        fxice(i, k) = max(0._kind_phys, fxice(i, k))
+      end do
 
-    ! Limit the flux out of the bottom of each cell to the water content in each phase.
-    ! Apply mxsedfac to prevent generating very small negative cloud water/ice
-    ! NOTE, REMOVED CLOUD FACTOR FROM AVAILABLE WATER. ALL CLOUD WATER IS IN CLOUDS.
-    ! ***Should we include the flux in the top, to allow for thin surface layers?
-    ! ***Requires simple treatment of cloud overlap, already included below.
-    do k = 1, pver
-      do i = 1, ncol
+      ! Limit the flux out of the bottom of each cell to the water content in each phase.
+      ! Apply mxsedfac to prevent generating very small negative cloud water/ice
+      ! NOTE, REMOVED CLOUD FACTOR FROM AVAILABLE WATER. ALL CLOUD WATER IS IN CLOUDS.
+      ! ***Should we include the flux in the top, to allow for thin surface layers?
+      ! ***Requires simple treatment of cloud overlap, already included below.
+      !$acc loop seq
+      do k = 1, pver
         fxliq(i, k + 1) = min(fxliq(i, k + 1), mxsedfac*cldliq(i, k)*pdel(i, k))
         fxice(i, k + 1) = min(fxice(i, k + 1), mxsedfac*cldice(i, k)*pdel(i, k))
         ! fxliq(i,k+1) = min( fxliq(i,k+1), cldliq(i,k) * pdel(i,k) + fxliq(i,k))
@@ -332,20 +336,21 @@ contains
         ! fxliq(i,k+1) = min( fxliq(i,k+1), cloud(i,k) * cldliq(i,k) * pdel(i,k) )
         ! fxice(i,k+1) = min( fxice(i,k+1), cloud(i,k) * cldice(i,k) * pdel(i,k) )
       end do
-    end do
 
-    ! Now calculate the tendencies assuming that condensate evaporates when
-    ! it falls into environment, and does not when it falls into cloud.
-    ! All flux out of the layer comes from the cloudy part.
-    ! Assume maximum overlap for stratiform clouds
-    !  if cloud above < cloud, all water falls into cloud below
-    !  if cloud above > cloud, water split between cloud and environment
-    do k = 1, pver
-      cldab(:ncol) = 0._kind_phys
-      do i = 1, ncol
+      ! Now calculate the tendencies assuming that condensate evaporates when
+      ! it falls into environment, and does not when it falls into cloud.
+      ! All flux out of the layer comes from the cloudy part.
+      ! Assume maximum overlap for stratiform clouds
+      !  if cloud above < cloud, all water falls into cloud below
+      !  if cloud above > cloud, water split between cloud and environment
+      !$acc loop seq
+      do k = 1, pver
+        ! As in the original code, the cloud above is reset to zero at
+        ! every level, so cldovrl uses cldab = 0.
+        cldab = 0._kind_phys
         ! cloud overlap cloud factor
-        cldovrl = min(cloud(i, k)/(cldab(i) + .0001_kind_phys), 1._kind_phys)
-        cldab(i) = cloud(i, k)
+        cldovrl = min(cloud(i, k)/(cldab + .0001_kind_phys), 1._kind_phys)
+        cldab = cloud(i, k)
         ! evaporation into environment cause moistening and cooling
         evapliq = fxliq(i, k)*(1._kind_phys - cldovrl)/(dtime*pdel(i, k))  ! into env [kg kg-1 s-1]
         evapice = fxice(i, k)*(1._kind_phys - cldovrl)/(dtime*pdel(i, k))  ! into env [kg kg-1 s-1]
@@ -355,102 +360,98 @@ contains
         liqtend(i, k) = (fxliq(i, k)*cldovrl - fxliq(i, k + 1))/(dtime*pdel(i, k))
         icetend(i, k) = (fxice(i, k)*cldovrl - fxice(i, k + 1))/(dtime*pdel(i, k))
       end do
+
+      ! convert flux out the bottom to mass units Pa -> kg/m2/s
+      sfliq(i) = fxliq(i, pverp)/(dtime*gravit)
+      sfice(i) = fxice(i, pverp)/(dtime*gravit)
+
+      ! Convert stratiform_lwe_cloud_ice_surface_flux_due_to_sedimentation from kg m-2 s-1 to precip units m s-1
+      sfice(i) = sfice(i)/1000._kind_phys
     end do
+    !$acc end data
 
-    ! convert flux out the bottom to mass units Pa -> kg/m2/s
-    sfliq(:ncol) = fxliq(:ncol, pverp)/(dtime*gravit)
-    sfice(:ncol) = fxice(:ncol, pverp)/(dtime*gravit)
-
-    ! Convert stratiform_lwe_cloud_ice_surface_flux_due_to_sedimentation from kg m-2 s-1 to precip units m s-1
-    sfice(:ncol) = sfice(:ncol)/1000._kind_phys
+    if (fail_liq > 0) then
+      write(errmsg,'(a,i0)') 'cloud_particle_sedimentation/cfint2: interval was not found for column ', fail_liq
+      errflg = 1
+    else if (fail_ice > 0) then
+      write(errmsg,'(a,i0)') 'cloud_particle_sedimentation/cfint2: interval was not found for column ', fail_ice
+      errflg = 1
+    end if
 
   end subroutine cloud_particle_sedimentation_run
 
-  ! Compute fluxes at interior points
-  subroutine getflx(ncol, pver, pverp, &
+  ! Compute fluxes at interior points of column icol. Arrays are whole,
+  ! (ncol, ...); psi .. delxh are work arrays. found is false if cfint2 did
+  ! not find the interval at some level (flux is then incomplete).
+  subroutine getflx_column(icol, pver, pverp, &
     xw, phi, vel, deltat, flux, &
-    errmsg, errflg)
+    psi, fdot, s, sh, d, dh, e, eh, delxh, found)
+    !$acc routine seq
     !.....xw1.......xw2.......xw3.......xw4.......xw5.......xw6
     !....psiw1.....psiw2.....psiw3.....psiw4.....psiw5.....psiw6
     !....velw1.....velw2.....velw3.....velw4.....velw5.....velw6
     !.........phi1......phi2.......phi3.....phi4.......phi5.......
 
-    integer,         intent(in)  :: ncol
-    integer,         intent(in)  :: pver
-    integer,         intent(in)  :: pverp
-    real(kind_phys), intent(in)  :: xw(ncol, pverp)
-    real(kind_phys), intent(in)  :: phi(ncol, pver)
-    real(kind_phys), intent(in)  :: vel(ncol, pverp)
-    real(kind_phys), intent(in)  :: deltat
+    integer,         intent(in)    :: icol
+    integer,         intent(in)    :: pver
+    integer,         intent(in)    :: pverp
+    real(kind_phys), intent(in)    :: xw(:,:)      ! (ncol, pverp)
+    real(kind_phys), intent(in)    :: phi(:,:)     ! (ncol, pver)
+    real(kind_phys), intent(in)    :: vel(:,:)     ! (ncol, pverp)
+    real(kind_phys), intent(in)    :: deltat
 
-    real(kind_phys),    intent(out)   :: flux(ncol, pverp)
-    character(len=512), intent(out)   :: errmsg         ! error message
-    integer,            intent(out)   :: errflg         ! error flag
+    real(kind_phys), intent(inout) :: flux(:,:)    ! (ncol, pverp)
+    real(kind_phys), intent(inout) :: psi(:,:), fdot(:,:), s(:,:), sh(:,:), &
+                                      d(:,:), dh(:,:), e(:,:), eh(:,:), delxh(:,:)
+    logical,         intent(out)   :: found
 
-    integer         :: i, k
-    real(kind_phys) :: psi(ncol, pverp)
-    real(kind_phys) :: fdot(ncol, pverp)
-    real(kind_phys) :: fxdot(ncol)
-    real(kind_phys) :: fxdd(ncol)
-    real(kind_phys) :: psistar(ncol)
-    real(kind_phys) :: xxk(ncol, pver)
+    integer         :: k
+    real(kind_phys) :: xxk
+    real(kind_phys) :: psistar
 
-    do i = 1, ncol
-      ! integral of phi
-      psi(i, 1) = 0._kind_phys
-      ! fluxes at boundaries
-      flux(i, 1) = 0._kind_phys
-      flux(i, pverp) = 0._kind_phys
-    end do
+    found = .true.
+
+    ! integral of phi
+    psi(icol, 1) = 0._kind_phys
+    ! fluxes at boundaries
+    flux(icol, 1) = 0._kind_phys
+    flux(icol, pverp) = 0._kind_phys
 
     ! integral function
     do k = 2, pverp
-      do i = 1, ncol
-        psi(i, k) = phi(i, k - 1)*(xw(i, k) - xw(i, k - 1)) + psi(i, k - 1)
-      end do
+      psi(icol, k) = phi(icol, k - 1)*(xw(icol, k) - xw(icol, k - 1)) + psi(icol, k - 1)
     end do
 
     ! Calculate the derivatives for the interpolating polynomial
-    call cfdotmc(ncol, pver, pverp, xw, psi, fdot)
+    call cfdotmc_column(icol, pver, pverp, xw, psi, fdot, s, sh, d, dh, e, eh, delxh)
 
     !  NEW WAY
     !    calculate fluxes at interior pts
     do k = 2, pver
-      do i = 1, ncol
-        xxk(i, k) = xw(i, k) - vel(i, k)*deltat
-      end do
+      xxk = xw(icol, k) - vel(icol, k)*deltat
+      call cfint2_column(icol, pverp, xw, psi, fdot, xxk, psistar, found)
+      if (.not. found) return
+      flux(icol, k) = (psi(icol, k) - psistar)
     end do
-    do k = 2, pver
-      call cfint2(ncol, pverp, xw, psi, fdot, xxk(1, k), fxdot, fxdd, psistar, errmsg, errflg)
-      if(errflg /= 0) then
-        return
-      endif
-      do i = 1, ncol
-        flux(i, k) = (psi(i, k) - psistar(i))
-      end do
-    end do
-  end subroutine getflx
+  end subroutine getflx_column
 
-  ! Vertical level interpolation
-  subroutine cfint2(ncol, pverp, &
-    x, f, fdot, xin, fxdot, fxdd, psistar, &
-    errmsg, errflg)
+  ! Vertical level interpolation at xin in column icol. found is false if the
+  ! interval was not found (psistar is then zero).
+  subroutine cfint2_column(icol, pverp, x, f, fdot, xin, psistar, found)
+    !$acc routine seq
 
-    integer,         intent(in)  :: ncol
+    integer,         intent(in)  :: icol
     integer,         intent(in)  :: pverp
-    real(kind_phys), intent(in)  :: x(ncol, pverp)
-    real(kind_phys), intent(in)  :: f(ncol, pverp)
-    real(kind_phys), intent(in)  :: fdot(ncol, pverp)
-    real(kind_phys), intent(in)  :: xin(ncol)
+    real(kind_phys), intent(in)  :: x(:,:)       ! (ncol, pverp)
+    real(kind_phys), intent(in)  :: f(:,:)       ! (ncol, pverp)
+    real(kind_phys), intent(in)  :: fdot(:,:)    ! (ncol, pverp)
+    real(kind_phys), intent(in)  :: xin
 
-    real(kind_phys), intent(out) :: fxdot(ncol)
-    real(kind_phys), intent(out) :: fxdd(ncol)
-    real(kind_phys), intent(out) :: psistar(ncol)
-    character(len=512), intent(out)   :: errmsg         ! error message
-    integer,            intent(out)   :: errflg         ! error flag
+    real(kind_phys), intent(out) :: psistar
+    logical,         intent(out) :: found
 
-    integer :: i, k
-    integer :: intz(ncol)
+    integer :: k
+    integer :: intz
     real(kind_phys) :: dx
     real(kind_phys) :: s
     real(kind_phys) :: c2
@@ -459,74 +460,60 @@ contains
     real(kind_phys) :: psi1, psi2, psi3, psim
     real(kind_phys) :: cfint
     real(kind_phys) :: cfnew
-    real(kind_phys) :: xins(ncol)
-    logical :: found_error
+    real(kind_phys) :: xins
 
-    do i = 1, ncol
-      xins(i) = medan(x(i, 1), xin(i), x(i, pverp))
-      intz(i) = 0
-    end do
+    xins = medan(x(icol, 1), xin, x(icol, pverp))
+    intz = 0
 
     ! first find the interval
     do k = 1, pverp - 1
-      do i = 1, ncol
-        if ((xins(i) - x(i, k))*(x(i, k + 1) - xins(i)) .ge. 0) then
-          intz(i) = k
-        end if
-      end do
+      if ((xins - x(icol, k))*(x(icol, k + 1) - xins) .ge. 0) then
+        intz = k
+      end if
     end do
 
-    found_error = .false.
-    do i = 1, ncol
-      if (intz(i) .eq. 0._kind_phys) found_error = .true.
-    end do
-    if (found_error) then
-      do i = 1, ncol
-        if (intz(i) .eq. 0._kind_phys) then
-          write(errmsg,'(a,i0)') 'cloud_particle_sedimentation/cfint2: interval was not found for column ', i
-          errflg = 1
-        end if
-      end do
+    found = intz /= 0
+    if (.not. found) then
+      psistar = 0._kind_phys
+      return
     end if
 
     ! now interpolate
-    do i = 1, ncol
-      k = intz(i)
-      dx = (x(i, k + 1) - x(i, k))
-      s = (f(i, k + 1) - f(i, k))/dx
-      c2 = (3*s - 2*fdot(i, k) - fdot(i, k + 1))/dx
-      c3 = (fdot(i, k) + fdot(i, k + 1) - 2*s)/dx**2
-      xx = (xins(i) - x(i, k))
-      fxdot(i) = (3*c3*xx + 2*c2)*xx + fdot(i, k)
-      fxdd(i) = 6*c3*xx + 2*c2
-      cfint = ((c3*xx + c2)*xx + fdot(i, k))*xx + f(i, k)
+    k = intz
+    dx = (x(icol, k + 1) - x(icol, k))
+    s = (f(icol, k + 1) - f(icol, k))/dx
+    c2 = (3*s - 2*fdot(icol, k) - fdot(icol, k + 1))/dx
+    c3 = (fdot(icol, k) + fdot(icol, k + 1) - 2*s)/dx**2
+    xx = (xins - x(icol, k))
+    cfint = ((c3*xx + c2)*xx + fdot(icol, k))*xx + f(icol, k)
 
-      ! limit the interpolant
-      psi1 = f(i, k) + (f(i, k + 1) - f(i, k))*xx/dx
-      if (k .eq. 1) then
-        psi2 = f(i, 1)
-      else
-        psi2 = f(i, k) + (f(i, k) - f(i, k - 1))*xx/(x(i, k) - x(i, k - 1))
-      end if
-      if (k + 1 .eq. pverp) then
-        psi3 = f(i, pverp)
-      else
-        psi3 = f(i, k + 1) - (f(i, k + 2) - f(i, k + 1))*(dx - xx)/(x(i, k + 2) - x(i, k + 1))
-      end if
-      psim = medan(psi1, psi2, psi3)
-      cfnew = medan(cfint, psi1, psim)
-      !if (abs(cfnew - cfint)/(abs(cfnew) + abs(cfint) + 1.e-36_kind_phys) .gt. .03_kind_phys) then
-      !    CHANGE THIS BACK LATER!!!
-      !    $      .gt..1) then
-      !    UNCOMMENT THIS LATER!!!
-      !        write(iulog,*) ' cfint2 limiting important ', cfint, cfnew
-      !end if
-      psistar(i) = cfnew
-    end do
-  end subroutine cfint2
+    ! limit the interpolant
+    psi1 = f(icol, k) + (f(icol, k + 1) - f(icol, k))*xx/dx
+    if (k .eq. 1) then
+      psi2 = f(icol, 1)
+    else
+      psi2 = f(icol, k) + (f(icol, k) - f(icol, k - 1))*xx/(x(icol, k) - x(icol, k - 1))
+    end if
+    if (k + 1 .eq. pverp) then
+      psi3 = f(icol, pverp)
+    else
+      psi3 = f(icol, k + 1) - (f(icol, k + 2) - f(icol, k + 1))*(dx - xx)/(x(icol, k + 2) - x(icol, k + 1))
+    end if
+    psim = medan(psi1, psi2, psi3)
+    cfnew = medan(cfint, psi1, psim)
+    !if (abs(cfnew - cfint)/(abs(cfnew) + abs(cfint) + 1.e-36_kind_phys) .gt. .03_kind_phys) then
+    !    CHANGE THIS BACK LATER!!!
+    !    $      .gt..1) then
+    !    UNCOMMENT THIS LATER!!!
+    !        write(iulog,*) ' cfint2 limiting important ', cfint, cfnew
+    !end if
+    psistar = cfnew
+  end subroutine cfint2_column
 
-  ! Calculate the derivative for the interpolating polynomial, multi-column version
-  subroutine cfdotmc(ncol, pver, pverp, x, f, fdot)
+  ! Calculate the derivative for the interpolating polynomial in column icol.
+  ! Arrays are whole, (ncol, pverp); s .. delxh are work arrays.
+  subroutine cfdotmc_column(icol, pver, pverp, x, f, fdot, s, sh, d, dh, e, eh, delxh)
+    !$acc routine seq
     ! assumed variable distribution
     !    x1.......x2.......x3.......x4.......x5.......x6    1,pverp points
     !    f1.......f2.......f3.......f4.......f5.......f6    1,pverp points
@@ -540,126 +527,124 @@ contains
     !    .................ppr3......ppr4................    3,pver-1 points
     !    .................t3........t4..................    3,pver-1 points
     !    ................fdot3.....fdot4................    3,pver-1 points
-    integer,         intent(in)  :: ncol
-    integer,         intent(in)  :: pver
-    integer,         intent(in)  :: pverp
-    real(kind_phys), intent(in)  :: x(ncol, pverp)
-    real(kind_phys), intent(in)  :: f(ncol, pverp)
+    integer,         intent(in)    :: icol
+    integer,         intent(in)    :: pver
+    integer,         intent(in)    :: pverp
+    real(kind_phys), intent(in)    :: x(:,:)
+    real(kind_phys), intent(in)    :: f(:,:)
 
-    real(kind_phys), intent(out) :: fdot(ncol, pverp)       ! derivative at nodes
+    real(kind_phys), intent(inout) :: fdot(:,:)    ! derivative at nodes
+    real(kind_phys), intent(inout) :: s(:,:)       ! first divided differences at nodes
+    real(kind_phys), intent(inout) :: sh(:,:)      ! first divided differences between nodes
+    real(kind_phys), intent(inout) :: d(:,:)       ! second divided differences at nodes
+    real(kind_phys), intent(inout) :: dh(:,:)      ! second divided differences between nodes
+    real(kind_phys), intent(inout) :: e(:,:)       ! third divided differences at nodes
+    real(kind_phys), intent(inout) :: eh(:,:)      ! third divided differences between nodes
+    real(kind_phys), intent(inout) :: delxh(:,:)
 
     integer :: i, k
-    real(kind_phys) :: s(ncol, pverp)         ! first divided differences at nodes
-    real(kind_phys) :: sh(ncol, pverp)        ! first divided differences between nodes
-    real(kind_phys) :: d(ncol, pverp)         ! second divided differences at nodes
-    real(kind_phys) :: dh(ncol, pverp)        ! second divided differences between nodes
-    real(kind_phys) :: e(ncol, pverp)         ! third divided differences at nodes
-    real(kind_phys) :: eh(ncol, pverp)        ! third divided differences between nodes
     real(kind_phys) :: pp                      ! p prime
-    real(kind_phys) :: ppl(ncol, pverp)       ! p prime on left
-    real(kind_phys) :: ppr(ncol, pverp)       ! p prime on right
+    real(kind_phys) :: ppl                     ! p prime on left
+    real(kind_phys) :: ppr                     ! p prime on right
     real(kind_phys) :: qpl
     real(kind_phys) :: qpr
     real(kind_phys) :: ttt
     real(kind_phys) :: t
     real(kind_phys) :: tmin
     real(kind_phys) :: tmax
-    real(kind_phys) :: delxh(ncol, pverp)
+    real(kind_phys) :: fd                      ! fdot(i, k) being computed
+
+    ! fdot(i, k) is computed in the scalar fd and stored once: with the
+    ! store-then-reload form (fdot(i, k) = ...; fdot(i, k) = f(fdot(i, k))),
+    ! nvfortran 25.9's device code dropped the first store and reloaded a stale
+    ! fdot(i, k) (GPU replay mismatch, 2026-11-18).
+
+    i = icol
 
     do k = 1, pver
       ! first divided differences between nodes
-      do i = 1, ncol
-        delxh(i, k) = (x(i, k + 1) - x(i, k))
-        sh(i, k) = (f(i, k + 1) - f(i, k))/delxh(i, k)
-      end do
+      delxh(i, k) = (x(i, k + 1) - x(i, k))
+      sh(i, k) = (f(i, k + 1) - f(i, k))/delxh(i, k)
 
       ! first and second divided differences at nodes
       if (k .ge. 2) then
-        do i = 1, ncol
-          d(i, k) = (sh(i, k) - sh(i, k - 1))/(x(i, k + 1) - x(i, k - 1))
-          s(i, k) = minmod(sh(i, k), sh(i, k - 1))
-        end do
+        d(i, k) = (sh(i, k) - sh(i, k - 1))/(x(i, k + 1) - x(i, k - 1))
+        s(i, k) = minmod(sh(i, k), sh(i, k - 1))
       end if
     end do
 
     ! second and third divided diffs between nodes
     do k = 2, pver - 1
-      do i = 1, ncol
-        eh(i, k) = (d(i, k + 1) - d(i, k))/(x(i, k + 2) - x(i, k - 1))
-        dh(i, k) = minmod(d(i, k), d(i, k + 1))
-      end do
+      eh(i, k) = (d(i, k + 1) - d(i, k))/(x(i, k + 2) - x(i, k - 1))
+      dh(i, k) = minmod(d(i, k), d(i, k + 1))
     end do
 
     ! treat the boundaries
-    do i = 1, ncol
-      e(i, 2) = eh(i, 2)
-      e(i, pver) = eh(i, pver - 1)
-      ! outside level
-      fdot(i, 1) = sh(i, 1) - d(i, 2)*delxh(i, 1) &
-                   - eh(i, 2)*delxh(i, 1)*(x(i, 1) - x(i, 3))
-      fdot(i, 1) = minmod(fdot(i, 1), 3*sh(i, 1))
-      fdot(i, pverp) = sh(i, pver) + d(i, pver)*delxh(i, pver) &
-                       + eh(i, pver - 1)*delxh(i, pver)*(x(i, pverp) - x(i, pver - 1))
-      fdot(i, pverp) = minmod(fdot(i, pverp), 3*sh(i, pver))
-      ! one in from boundary
-      fdot(i, 2) = sh(i, 1) + d(i, 2)*delxh(i, 1) - eh(i, 2)*delxh(i, 1)*delxh(i, 2)
-      fdot(i, 2) = minmod(fdot(i, 2), 3*s(i, 2))
-      fdot(i, pver) = sh(i, pver) - d(i, pver)*delxh(i, pver) &
-                      - eh(i, pver - 1)*delxh(i, pver)*delxh(i, pver - 1)
-      fdot(i, pver) = minmod(fdot(i, pver), 3*s(i, pver))
+    e(i, 2) = eh(i, 2)
+    e(i, pver) = eh(i, pver - 1)
+    ! outside level
+    fd = sh(i, 1) - d(i, 2)*delxh(i, 1) &
+         - eh(i, 2)*delxh(i, 1)*(x(i, 1) - x(i, 3))
+    fdot(i, 1) = minmod(fd, 3*sh(i, 1))
+    fd = sh(i, pver) + d(i, pver)*delxh(i, pver) &
+         + eh(i, pver - 1)*delxh(i, pver)*(x(i, pverp) - x(i, pver - 1))
+    fdot(i, pverp) = minmod(fd, 3*sh(i, pver))
+    ! one in from boundary
+    fd = sh(i, 1) + d(i, 2)*delxh(i, 1) - eh(i, 2)*delxh(i, 1)*delxh(i, 2)
+    fdot(i, 2) = minmod(fd, 3*s(i, 2))
+    fd = sh(i, pver) - d(i, pver)*delxh(i, pver) &
+         - eh(i, pver - 1)*delxh(i, pver)*delxh(i, pver - 1)
+    fdot(i, pver) = minmod(fd, 3*s(i, pver))
+
+    do k = 3, pver - 1
+      e(i, k) = minmod(eh(i, k), eh(i, k - 1))
     end do
 
     do k = 3, pver - 1
-      do i = 1, ncol
-        e(i, k) = minmod(eh(i, k), eh(i, k - 1))
-      end do
+      ! p prime at k-0.5
+      ppl = sh(i, k - 1) + dh(i, k - 1)*delxh(i, k - 1)
+      ! p prime at k+0.5
+      ppr = sh(i, k) - dh(i, k)*delxh(i, k)
+
+      t = minmod(ppl, ppr)
+
+      ! derivate from parabola thru f(i,k-1), f(i,k), and f(i,k+1)
+      pp = sh(i, k - 1) + d(i, k)*delxh(i, k - 1)
+
+      ! quartic estimate of fdot
+      fd = pp &
+           - delxh(i, k - 1)*delxh(i, k) &
+           *(eh(i, k - 1)*(x(i, k + 2) - x(i, k)) &
+             + eh(i, k)*(x(i, k) - x(i, k - 2)) &
+             )/(x(i, k + 2) - x(i, k - 2))
+
+      ! now limit it
+      qpl = sh(i, k - 1) &
+            + delxh(i, k - 1)*minmod(d(i, k - 1) + e(i, k - 1)*(x(i, k) - x(i, k - 2)), &
+                                     d(i, k) - e(i, k)*delxh(i, k))
+      qpr = sh(i, k) &
+            + delxh(i, k)*minmod(d(i, k) + e(i, k)*delxh(i, k - 1), &
+                                 d(i, k + 1) + e(i, k + 1)*(x(i, k) - x(i, k + 2)))
+
+      fd = medan(fd, qpl, qpr)
+
+      ttt = minmod(qpl, qpr)
+      tmin = min(0._kind_phys, 3*s(i, k), 1.5_kind_phys*t, ttt)
+      tmax = max(0._kind_phys, 3*s(i, k), 1.5_kind_phys*t, ttt)
+
+      fdot(i, k) = fd + minmod(tmin - fd, tmax - fd)
     end do
-
-    do k = 3, pver - 1
-      do i = 1, ncol
-        ! p prime at k-0.5
-        ppl(i, k) = sh(i, k - 1) + dh(i, k - 1)*delxh(i, k - 1)
-        ! p prime at k+0.5
-        ppr(i, k) = sh(i, k) - dh(i, k)*delxh(i, k)
-
-        t = minmod(ppl(i, k), ppr(i, k))
-
-        ! derivate from parabola thru f(i,k-1), f(i,k), and f(i,k+1)
-        pp = sh(i, k - 1) + d(i, k)*delxh(i, k - 1)
-
-        ! quartic estimate of fdot
-        fdot(i, k) = pp &
-                     - delxh(i, k - 1)*delxh(i, k) &
-                     *(eh(i, k - 1)*(x(i, k + 2) - x(i, k)) &
-                       + eh(i, k)*(x(i, k) - x(i, k - 2)) &
-                       )/(x(i, k + 2) - x(i, k - 2))
-
-        ! now limit it
-        qpl = sh(i, k - 1) &
-              + delxh(i, k - 1)*minmod(d(i, k - 1) + e(i, k - 1)*(x(i, k) - x(i, k - 2)), &
-                                       d(i, k) - e(i, k)*delxh(i, k))
-        qpr = sh(i, k) &
-              + delxh(i, k)*minmod(d(i, k) + e(i, k)*delxh(i, k - 1), &
-                                   d(i, k + 1) + e(i, k + 1)*(x(i, k) - x(i, k + 2)))
-
-        fdot(i, k) = medan(fdot(i, k), qpl, qpr)
-
-        ttt = minmod(qpl, qpr)
-        tmin = min(0._kind_phys, 3*s(i, k), 1.5_kind_phys*t, ttt)
-        tmax = max(0._kind_phys, 3*s(i, k), 1.5_kind_phys*t, ttt)
-
-        fdot(i, k) = fdot(i, k) + minmod(tmin - fdot(i, k), tmax - fdot(i, k))
-      end do
-    end do
-  end subroutine cfdotmc
+  end subroutine cfdotmc_column
 
   pure function minmod(a, b) result(res)
+      !$acc routine seq
       real(kind_phys), intent(in) :: a, b
       real(kind_phys) :: res
       res = 0.5_kind_phys*(sign(1._kind_phys, a) + sign(1._kind_phys, b))*min(abs(a), abs(b))
   end function minmod
 
   pure function medan(a, b, c) result(res)
+      !$acc routine seq
       real(kind_phys), intent(in) :: a, b, c
       real(kind_phys) :: res
       res = a + minmod(b - a, c - a)

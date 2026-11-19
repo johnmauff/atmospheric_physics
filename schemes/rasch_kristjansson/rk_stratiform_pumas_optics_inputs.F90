@@ -61,12 +61,12 @@ contains
     errmsg = ''
     errflg = 0
 
-    dei(:ncol,:)  = 0._kind_phys
-    pgam(:ncol,:) = 0._kind_phys
-    lamc(:ncol,:) = 0._kind_phys
-
+    !$acc parallel loop collapse(2) copyin(rel, rei, iclwp, iciwp) copyout(dei, pgam, lamc)
     do k = 1, pver
       do i = 1, ncol
+        dei(i,k)  = 0._kind_phys
+        pgam(i,k) = 0._kind_phys
+        lamc(i,k) = 0._kind_phys
         ! lamc > 0 flags cloud presence to the liquid optics.
         if (iclwp(i,k) > 0._kind_phys .and. rel(i,k) > 0._kind_phys) then
           pgam(i,k) = pgam_fixed

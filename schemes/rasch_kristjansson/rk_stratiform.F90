@@ -53,6 +53,9 @@ contains
     character(len=512), intent(out)   :: errmsg         ! error message
     integer,            intent(out)   :: errflg         ! error flag
 
+    integer :: i, k
+    logical :: init_l, init_q, init_t
+
     errmsg = ''
     errflg = 0
 
@@ -61,18 +64,44 @@ contains
 
     ! lcwat is initialized from initial conditions of cldice, cldliq
     ! TODO: check if this is always done (appears to be from physpkg.F90) or should be read from snapshot.
-    if(qcwat(1,1) < 0._kind_phys .or. tcwat(1,1) < 0._kind_phys) then
-      lcwat(:ncol,:) = cldice(:ncol,:) + cldliq(:ncol,:)
+    !$acc data copyin(t, q_wv, cldice, cldliq) copy(qcwat, tcwat, lcwat)
+
+    ! The tests read element (1,1), on the device (all three before any update).
+    !$acc serial copyout(init_l, init_q, init_t)
+    init_l = qcwat(1,1) < 0._kind_phys .or. tcwat(1,1) < 0._kind_phys
+    init_q = qcwat(1,1) < 0._kind_phys
+    init_t = tcwat(1,1) < 0._kind_phys
+    !$acc end serial
+
+    if (init_l) then
+      !$acc parallel loop collapse(2)
+      do k = 1, pver
+        do i = 1, ncol
+          lcwat(i,k) = cldice(i,k) + cldliq(i,k)
+        end do
+      end do
     endif
 
     ! The registry will set default negative values if not read from snapshot.
-    if(qcwat(1,1) < 0._kind_phys) then
-      qcwat(:ncol,:) = q_wv(:ncol,:)
+    if (init_q) then
+      !$acc parallel loop collapse(2)
+      do k = 1, pver
+        do i = 1, ncol
+          qcwat(i,k) = q_wv(i,k)
+        end do
+      end do
     endif
 
-    if(tcwat(1,1) < 0._kind_phys) then
-      tcwat(:ncol,:) = t(:ncol,:)
+    if (init_t) then
+      !$acc parallel loop collapse(2)
+      do k = 1, pver
+        do i = 1, ncol
+          tcwat(i,k) = t(i,k)
+        end do
+      end do
     endif
+
+    !$acc end data
 
   end subroutine rk_stratiform_check_qtlcwat_run
 
@@ -98,17 +127,21 @@ contains
     integer,            intent(out)   :: errflg          ! error flag
 
     real(kind_phys),    parameter     :: rhofw = 1000._kind_phys  ! density of fresh water [kg m-3]
+    integer :: i
 
     errmsg = ''
     errflg = 0
 
     ! Convert rain flux to precip units from mass units
     ! and create cloud water surface flux (rain + snow)
-    prec_sed(:ncol) = sfliq(:ncol)/rhofw + snow_sed(:ncol)
+    !$acc parallel loop copyin(sfliq, snow_sed) copyout(prec_sed, prec_str, snow_str)
+    do i = 1, ncol
+      prec_sed(i) = sfliq(i)/rhofw + snow_sed(i)
 
     ! Start accumulation of precipitation and snow flux [m s-1]
-    prec_str(:ncol) = 0._kind_phys + prec_sed(:ncol)
-    snow_str(:ncol) = 0._kind_phys + snow_sed(:ncol)
+      prec_str(i) = 0._kind_phys + prec_sed(i)
+      snow_str(i) = 0._kind_phys + snow_sed(i)
+    end do
 
   end subroutine rk_stratiform_sedimentation_run
 
@@ -129,11 +162,18 @@ contains
     character(len=512), intent(out)   :: errmsg         ! error message
     integer,            intent(out)   :: errflg         ! error flag
 
+    integer :: i, k
+
     errmsg = ''
     errflg = 0
 
     ! Apply detrainment tendency to cloud liquid water
-    tend_cldliq(:ncol,:) = dlf(:ncol,:)
+    !$acc parallel loop collapse(2) copyin(dlf) copyout(tend_cldliq)
+    do k = 1, size(tend_cldliq, 2)
+      do i = 1, ncol
+        tend_cldliq(i,k) = dlf(i,k)
+      end do
+    end do
 
   end subroutine rk_stratiform_detrain_convective_condensate_run
 
@@ -213,6 +253,14 @@ contains
     errmsg = ''
     errflg = 0
 
+    ! Everything stays on the device: compute_cloud_fraction_run's own data
+    ! clauses find these arrays present (whole arrays are passed, as the
+    ! cap does, so its present checks see the same objects).
+    !$acc data copyin(pmid, ps, temp, sst, q_wv, cldice, phis, shallowcu, deepcu, &
+    !$acc&            concld, landfrac, ocnfrac, snowh, cloud, relhum) &
+    !$acc&     copy(rhu00) copyout(rhdfda) &
+    !$acc&     create(cloud2, rhcloud2, cldst2, rhu002, icecldf2, liqcldf2, relhum2)
+
     ! Call perturbed version of compute_cloud_fraction scheme
     call compute_cloud_fraction_run( &
       ncol              = ncol,                 &
@@ -224,33 +272,37 @@ contains
       pref              = pref,                 &
       lapse_rate        = lapse_rate,           &
       top_lev_cloudphys = top_lev_cloudphys,    & ! CAM4 macrophysics - top lev is 1
-      pmid              = pmid(:ncol,:),        &
-      ps                = ps(:ncol),            &
-      temp              = temp(:ncol,:),        &
-      sst               = sst(:ncol),           &
-      q                 = q_wv(:ncol,:),        &
-      cldice            = cldice(:ncol,:),      &
-      phis              = phis(:ncol),          &
-      shallowcu         = shallowcu(:ncol,:),   &
-      deepcu            = deepcu(:ncol,:),      &
-      concld            = concld(:ncol,:),      &
-      landfrac          = landfrac(:ncol),      &
-      ocnfrac           = ocnfrac(:ncol),       &
-      snowh             = snowh(:ncol),         &
+      pmid              = pmid,                 &
+      ps                = ps,                   &
+      temp              = temp,                 &
+      sst               = sst,                  &
+      q                 = q_wv,                 &
+      cldice            = cldice,               &
+      phis              = phis,                 &
+      shallowcu         = shallowcu,            &
+      deepcu            = deepcu,               &
+      concld            = concld,               &
+      landfrac          = landfrac,             &
+      ocnfrac           = ocnfrac,              &
+      snowh             = snowh,                &
       rhpert_flag       = .true.,               & ! ** apply perturbation here **
-      cloud             = cloud2(:ncol, :),     &
-      rhcloud           = rhcloud2(:ncol, :),   &
-      cldst             = cldst2(:ncol,:),      &
-      rhu00             = rhu002(:ncol,:),      &
-      icecldf           = icecldf2(:ncol,:),    &
-      liqcldf           = liqcldf2(:ncol,:),    &
-      relhum            = relhum2(:ncol,:),     &
+      cloud             = cloud2,               &
+      rhcloud           = rhcloud2,             &
+      cldst             = cldst2,               &
+      rhu00             = rhu002,               &
+      icecldf           = icecldf2,             &
+      liqcldf           = liqcldf2,             &
+      relhum            = relhum2,              &
       errmsg            = errmsg,               &
       errflg            = errflg)
 
     ! Compute rhdfda (derivative of RH w.r.t. cloud fraction)
     ! for use in the prognostic_cloud_water scheme.
-    rhu00(:ncol,1) = 2.0_kind_phys   ! arbitrary number larger than 1 (100%)
+    !$acc parallel loop gang vector
+    do i = 1, ncol
+      rhu00(i,1) = 2.0_kind_phys   ! arbitrary number larger than 1 (100%)
+    end do
+    !$acc parallel loop gang vector collapse(2)
     do k = 1, pver
       do i = 1, ncol
          if( relhum(i,k) < rhu00(i,k) ) then
@@ -268,6 +320,7 @@ contains
          endif
       enddo
     enddo
+    !$acc end data
 
   end subroutine rk_stratiform_cloud_fraction_perturbation_run
 
@@ -307,16 +360,23 @@ contains
     integer,            intent(out)   :: errflg         ! error flag
 
     ! Local arguments
-    real(kind_phys)  :: totcw(ncol, pver)
+    real(kind_phys)  :: totcw
+    integer :: i, k
 
     errmsg = ''
     errflg = 0
 
-    totcw(:ncol,:)     = cldice(:ncol,:) + cldliq(:ncol,:)
+    !$acc parallel loop collapse(2) private(totcw) &
+    !$acc   copyin(t, q_wv, cldice, cldliq, qcwat, tcwat, lcwat) copyout(qtend, ttend, ltend)
+    do k = 1, pver
+      do i = 1, ncol
+        totcw      = cldice(i,k) + cldliq(i,k)
 
-    qtend(:ncol,:pver) = 1.0_kind_phys / dtime * (q_wv  (:ncol,:pver) - qcwat(:ncol,:pver))
-    ttend(:ncol,:pver) = 1.0_kind_phys / dtime * (t     (:ncol,:pver) - tcwat(:ncol,:pver))
-    ltend(:ncol,:pver) = 1.0_kind_phys / dtime * (totcw (:ncol,:pver) - lcwat(:ncol,:pver))
+        qtend(i,k) = 1.0_kind_phys / dtime * (q_wv(i,k) - qcwat(i,k))
+        ttend(i,k) = 1.0_kind_phys / dtime * (t(i,k)    - tcwat(i,k))
+        ltend(i,k) = 1.0_kind_phys / dtime * (totcw     - lcwat(i,k))
+      end do
+    end do
 
   end subroutine rk_stratiform_external_forcings_run
 
@@ -354,16 +414,23 @@ contains
     integer,            intent(out)   :: errflg            ! error flag
 
     ! Local arguments
-    real(kind_phys)  :: totcw(ncol, pver)
+    real(kind_phys)  :: totcw
+    integer :: i, k
 
     errmsg = ''
     errflg = 0
 
-    totcw(:ncol,:) = cldice(:ncol,:) + cldliq(:ncol,:)
-    tend_cldice(:ncol,:) = 1.0_kind_phys / dtime * ( totcw(:ncol,:)*fice(:ncol,:)                 - cldice(:ncol,:) )
-    tend_cldliq(:ncol,:) = 1.0_kind_phys / dtime * ( totcw(:ncol,:)*(1.0_kind_phys-fice(:ncol,:)) - cldliq(:ncol,:) )
+    !$acc parallel loop collapse(2) private(totcw) &
+    !$acc   copyin(cldice, cldliq, fice) copyout(repartht, tend_cldice, tend_cldliq)
+    do k = 1, pver
+      do i = 1, ncol
+        totcw = cldice(i,k) + cldliq(i,k)
+        tend_cldice(i,k) = 1.0_kind_phys / dtime * ( totcw*fice(i,k)                 - cldice(i,k) )
+        tend_cldliq(i,k) = 1.0_kind_phys / dtime * ( totcw*(1.0_kind_phys-fice(i,k)) - cldliq(i,k) )
 
-    repartht(:ncol,:pver) = latice * tend_cldice(:ncol,:pver)
+        repartht(i,k) = latice * tend_cldice(i,k)
+      end do
+    end do
 
   end subroutine rk_stratiform_condensate_repartioning_run
 
@@ -425,6 +492,11 @@ contains
     errmsg = ''
     errflg = 0
 
+    !$acc data copyin(qme, fice, evapheat, prfzheat, meltheat, repartht, evapprec, ice2pr, &
+    !$acc             liq2pr, prec_pcw, snow_pcw) &
+    !$acc      copy(prec_str, snow_str) &
+    !$acc      copyout(cmeheat, cmeice, cmeliq, tend_s, tend_q, tend_cldice, tend_cldliq)
+    !$acc parallel loop collapse(2)
     do k = 1, pver
       do i = 1, ncol
         ! Heating from cond-evap within the cloud [J kg-1 s-1]
@@ -445,8 +517,12 @@ contains
       end do
    end do
 
-   prec_str(:ncol) = prec_str(:ncol) + prec_pcw(:ncol)
-   snow_str(:ncol) = snow_str(:ncol) + snow_pcw(:ncol)
+   !$acc parallel loop
+   do i = 1, ncol
+     prec_str(i) = prec_str(i) + prec_pcw(i)
+     snow_str(i) = snow_str(i) + snow_pcw(i)
+   end do
+   !$acc end data
 
   end subroutine rk_stratiform_prognostic_cloud_water_tendencies_run
 
@@ -478,15 +554,18 @@ contains
     integer,            intent(out)   :: errflg         ! error flag
 
     ! Local variables
-    integer :: k
+    integer :: i, k
 
     errmsg = ''
     errflg = 0
 
+    !$acc parallel loop collapse(2) copyin(t, q_wv, cldice, cldliq) copyout(qcwat, tcwat, lcwat)
     do k = 1, pver
-      qcwat(:ncol,k) = q_wv(:ncol,k)
-      tcwat(:ncol,k) = t(:ncol,k)
-      lcwat(:ncol,k) = cldice(:ncol,k) + cldliq(:ncol,k)
+      do i = 1, ncol
+        qcwat(i,k) = q_wv(i,k)
+        tcwat(i,k) = t(i,k)
+        lcwat(i,k) = cldice(i,k) + cldliq(i,k)
+      end do
     enddo
 
   end subroutine rk_stratiform_save_qtlcwat_run
@@ -503,7 +582,7 @@ contains
     errmsg, errflg)
 
     ! Dependency: to_be_ccppized
-    use cloud_optical_properties, only: cldefr
+    use cloud_optical_properties, only: rel_point, rei_point
 
     ! Input arguments
     integer,            intent(in)    :: ncol
@@ -524,22 +603,23 @@ contains
     character(len=512), intent(out)   :: errmsg         ! error message
     integer,            intent(out)   :: errflg         ! error flag
 
+    integer :: i, k
+
     errmsg = ''
     errflg = 0
 
-    call cldefr( &
-      ncol = ncol, &
-      pver = pver, &
-      tmelt = tmelt, &
-      landfrac = landfrac(:ncol), &
-      icefrac = icefrac(:ncol), &
-      snowh = snowh(:ncol), &
-      landm = landm(:ncol), &
-      t = t(:ncol,:), &
-      ps = ps(:ncol), &
-      pmid = pmid(:ncol,:), & ! below output:
-      rel = rel(:ncol,:), &
-      rei = rei(:ncol,:))
+    ! cldefr (reltab following Kiehl, reitab following Kristjansson and
+    ! Mitchell) one point at a time. ps and pmid are unused by cldefr; they
+    ! are in the data clause so they stay device arguments.
+    !$acc data copyin(landfrac, icefrac, snowh, landm, t, ps, pmid) copyout(rel, rei)
+    !$acc parallel loop gang vector collapse(2)
+    do k = 1, pver
+      do i = 1, ncol
+        rel(i,k) = rel_point(tmelt, t(i,k), snowh(i), landm(i), icefrac(i))
+        rei(i,k) = rei_point(t(i,k))
+      end do
+    end do
+    !$acc end data
 
   end subroutine rk_stratiform_cloud_optical_properties_run
 
