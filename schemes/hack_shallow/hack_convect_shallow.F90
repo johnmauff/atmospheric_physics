@@ -295,6 +295,8 @@ contains
     real(kind_phys) :: vtemp4(2*ncol)      ! intermediate scratch vector
     real(kind_phys) :: vtemp5(2*ncol)      ! intermediate scratch vector
     logical         :: convect(ncol)       ! moist convective instability at this level (was the gather index indx1)
+    logical         :: convect_dbg(ncol,pver) ! convect at each level (debug_verbose output only)
+    real(kind_phys) :: dbg_vals(5,pver)    ! sc, shc, hc, beta, eta of column 1 at each level (debug_verbose output only)
     logical         :: etagt0              ! true if eta > 0.0
     real(kind_phys) :: cats                ! modified characteristic adj. time
     real(kind_phys) :: rtdt                ! 1./ztodt
@@ -380,20 +382,22 @@ contains
     endif
     rtdt = 1.0_kind_phys/ztodt
 
-    ! OpenACC: the level loop (kloop) runs on the host; each level is one
-    ! kernel over columns (one thread per column) for the cloud model and
-    ! constituent transport, then one kernel for the per-point qsat
-    ! (qsat_line, routine seq) and the scatter. Columns are independent
-    ! within a level, so a mask
-    ! (convect) replaces the gathered index vector of the CPU original;
-    ! every column's operations are unchanged.
+    ! OpenACC: the level loop (kloop) is one kernel over columns (one thread
+    ! per column) with the levels in order inside it: the cloud model and
+    ! constituent transport, the per-point qsat (qsat_line, routine seq) and
+    ! scatter, and the convective top/bottom update of each level. Columns
+    ! are independent at every level, so a mask (convect) replaces the
+    ! gathered index vector of the CPU original; every column's operations
+    ! are unchanged. The debug_verbose output of each level is recorded in
+    ! the kernel and printed on the host afterwards, in the same order.
     !$acc data copyin(pmid, pdel, rpdel, rpdeldry, zm, qpert_in, phis, pblh, t, q, const_dry) &
     !$acc      copy(dq, qc_sh, cmfdt, cmfmc_sh, cmfdqr, cmfsl, cmflq, precc, cnt_sh, cnb_sh, &
     !$acc           icwmr, rliq_sh, flx_cnd) &
     !$acc      create(tpert, cmfdq, gam, sb, hb, shbs, hbs, shbh, sbh, hbh, cmrh, prec, dzcld, &
     !$acc             beta, betamx, eta, etagdt, cldwtr, rnwtr, totcond, sc, shc, hc, cmrc, &
     !$acc             dq1, dq2, dq3, ds1, ds2, ds3, dcmr1, dcmr2, dcmr3, estemp, &
-    !$acc             vtemp1, vtemp2, vtemp3, vtemp4, vtemp5, convect, tb, shb)
+    !$acc             vtemp1, vtemp2, vtemp3, vtemp4, vtemp5, convect, tb, shb, &
+    !$acc             convect_dbg, dbg_vals)
 
     !---------------------------------------------------
     ! Initialize output tendencies
@@ -527,12 +531,14 @@ contains
     ! Begin moist convective mass flux adjustment procedure.
     ! Formalism ensures that negative cloud liquid water can never occur
     !---------------------------------------------------
+    !$acc parallel loop gang vector &
+    !$acc   private(k, qprime, tprime, pblhgt, fac1, qsattp, shprme, dz, temp1, b1, b2, &
+    !$acc           temp2, temp3, g, tmass, denom, qtest1, qtest2, fslkp, fslkm, fqlkp, &
+    !$acc           fqlkm, m, botflx, topflx, efac1, efac2, efac3, rpdkp1, rpdk, rpdkm1, &
+    !$acc           etagt0, ktp)
+    do i = 1, ncol
+    !$acc loop seq
     kloop: do k = pver-1,limcnv+1,-1
-      !$acc parallel loop gang vector &
-      !$acc   private(qprime, tprime, pblhgt, fac1, qsattp, shprme, dz, temp1, b1, b2, &
-      !$acc           temp2, temp3, g, tmass, denom, qtest1, qtest2, fslkp, fslkm, fqlkp, &
-      !$acc           fqlkm, m, botflx, topflx, efac1, efac2, efac3, rpdkp1, rpdk, rpdkm1)
-      do i = 1, ncol
         etagdt(i) = 0.0_kind_phys
         eta   (i) = 0.0_kind_phys
         beta  (i) = 0.0_kind_phys
@@ -850,24 +856,18 @@ contains
           end do
           ! Constituent modifications complete
         end if ! convect(i)
-      enddo
 
       if(debug_verbose) then
-        ! DEBUG DIAGNOSTICS - output thermodynamic perturbation information
-        !$acc update self(sc, shc, hc, beta, eta, convect)
-        do i=1,ncol
-          if(i == 1) then
-            write(iulog,8090) k+1,sc(i),shc(i),hc(i)
-          end if
-        enddo
-        len1 = count(convect(1:ncol))
-        if (len1 > 0) then
-          do i=1,ncol
-            if (i == 1) then
-              write(iulog,8080) beta(i), eta(i)
-            endif
-          enddo
-        endif
+        ! DEBUG DIAGNOSTICS - record the thermodynamic perturbation information
+        ! of this level (printed on the host after the kernel)
+        convect_dbg(i,k) = convect(i)
+        if (i == 1) then
+          dbg_vals(1,k) = sc(i)
+          dbg_vals(2,k) = shc(i)
+          dbg_vals(3,k) = hc(i)
+          dbg_vals(4,k) = beta(i)
+          dbg_vals(5,k) = eta(i)
+        end if
       endif
 
       ! This if restructured from a goto
@@ -877,8 +877,6 @@ contains
         ! point (qsat_line, routine seq) for every column (the CPU original
         ! gathered the convecting ones); only convecting columns take the
         ! result. The vtemp scratch keeps the values the vector call left.
-        !$acc parallel loop gang vector
-        do i=1,ncol
            vtemp1(i     ) = tb(i,k)
            vtemp1(i+ncol) = tb(i,k-1)
            vtemp2(i     ) = pmid(i,k)
@@ -906,7 +904,6 @@ contains
               shbh(i,k-1) = qhalf(shb(i,k-2),shb(i,k-1),shbs(i,k-2),shbs(i,k-1))
               hbh (i,k-1) = sbh(i,k-1) + hlat*shbh(i,k-1)
            end if
-        end do
       end if ! k /= limcnv+1
 
       ! Ensure that dzcld is reset if convective mass flux zero
@@ -914,8 +911,6 @@ contains
       ! top of convective layer determined by size of overshoot param.
       ! (When no column convects, the CPU original skipped this loop; it
       ! changes nothing then: eta is zero and dzcld already zeroed.)
-      !$acc parallel loop gang vector private(etagt0, ktp)
-      do i=1,ncol
         etagt0 = eta(i).gt.0.0_kind_phys
         if ( .not. etagt0) dzcld(i) = 0.0_kind_phys
         if (etagt0 .and. beta(i) > betamn) then
@@ -927,8 +922,20 @@ contains
            cnt_sh(i) = min(cnt_sh(i),ktp)
            cnb_sh(i) = max(cnb_sh(i),k)
         end if
-      end do
     end do kloop
+    end do
+
+    if(debug_verbose) then
+      ! DEBUG DIAGNOSTICS - output thermodynamic perturbation information
+      ! (recorded in the kernel above; same order and values as per level)
+      !$acc update self(dbg_vals, convect_dbg)
+      do k = pver-1,limcnv+1,-1
+        write(iulog,8090) k+1,dbg_vals(1,k),dbg_vals(2,k),dbg_vals(3,k)
+        if (count(convect_dbg(1:ncol,k)) > 0) then
+          write(iulog,8080) dbg_vals(4,k), dbg_vals(5,k)
+        endif
+      end do
+    endif
 
     !---------------------------------------------------
     ! apply final thermodynamic tendencies

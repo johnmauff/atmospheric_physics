@@ -18,6 +18,8 @@ subroutine rrtmgp_post_run(nlay, dolw, qrs_prime, qrl_prime, fsns, pdel, atm_opt
    use ccpp_fluxes,            only: ty_fluxes_broadband_ccpp
    use ccpp_fluxes_byband,     only: ty_fluxes_byband_ccpp
    use ccpp_gas_concentrations, only: ty_gas_concs_ccpp
+   use mo_rte_kind,            only: wl
+   use mo_rte_config,          only: rte_config_checks
    integer,                          intent(in)    :: nlay           ! Number of layers in radiation calculation
    logical,                          intent(in)    :: dolw           ! Flag for whether to perform longwave calculation
    real(kind_phys), dimension(:,:),  intent(in)    :: pdel           ! Layer thickness [Pa]
@@ -71,6 +73,15 @@ subroutine rrtmgp_post_run(nlay, dolw, qrs_prime, qrl_prime, fsns, pdel, atm_opt
    ! copies are a later step (rrtmgp-rte-object-residency).
    if (dolw) then
       flwds(:) = flw%fluxes%flux_dn(:, nlay+1)
+   end if
+
+   ! RTE-RRTMGP checks its input values (check_values: range checks of
+   ! every optical property, source and boundary condition, each a
+   ! reduction returned to the host) on the first radiation call only, as
+   ! RTE's own all-sky example does; the array extent checks (host-only)
+   ! stay on. The value checks change no answers, only report errors.
+   if (dolw) then
+      call rte_config_checks(logical(.true., wl), logical(.false., wl))
    end if
 
    call free_optics_sw(atm_optics_sw, errmsg, errflg)
