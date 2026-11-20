@@ -50,17 +50,23 @@ contains
     ! Local variables
     real(kind_phys) :: te(ncol, 4)                      ! total energy of input/output states (copy)
     real(kind_phys) :: te_glob(4)                       ! global means of total energy
+    integer         :: i
 
     errmsg = ''
     errflg = 0
 
     ! Copy total energy out of input and output states.
-    ! These four fields will have their global means calculated respectively
-    te(:ncol, 1) = te_ini_dyn(:ncol)        ! Input energy using dycore energy formula [J m-2]
-    te(:ncol, 2) = teout(:ncol)             ! Total energy from end of physics timestep [J m-2]
-    te(:ncol, 3) = pint(:ncol, pver+1)      ! Surface pressure for heating rate [Pa]
-    te(:ncol, 4) = pint(:ncol, 1)           ! Model top pressure for heating rate [Pa]
-                                            ! not constant for z-based vertical coordinate
+    ! These four fields will have their global means calculated respectively.
+    ! OpenACC: packed on the device, where the inputs are; only te (4*ncol
+    ! values) comes back for the host global mean.
+    !$acc parallel loop gang vector copyin(te_ini_dyn, teout, pint) copyout(te)
+    do i = 1, ncol
+      te(i, 1) = te_ini_dyn(i)        ! Input energy using dycore energy formula [J m-2]
+      te(i, 2) = teout(i)             ! Total energy from end of physics timestep [J m-2]
+      te(i, 3) = pint(i, pver+1)      ! Surface pressure for heating rate [Pa]
+      te(i, 4) = pint(i, 1)           ! Model top pressure for heating rate [Pa]
+                                      ! not constant for z-based vertical coordinate
+    end do
 
     ! Compute global means of input and output energies and of surface pressure for heating rate.
     call gmean(te, te_glob, 4)
