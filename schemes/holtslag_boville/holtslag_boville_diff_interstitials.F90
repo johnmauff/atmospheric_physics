@@ -47,6 +47,9 @@ contains
 
   ! Interstitial for full HB (CAM4) to handle inputs from coupler and pass them
   ! to vertical diffusion solver.
+  !
+  ! OpenACC: one data region; the copies are pointwise kernels. itaures stays
+  ! a host scalar.
 !> \section arg_table_hb_diff_prepare_vertical_diffusion_inputs_run Argument Table
 !! \htmlinclude hb_diff_prepare_vertical_diffusion_inputs_run.html
   subroutine hb_diff_prepare_vertical_diffusion_inputs_run( &
@@ -79,14 +82,30 @@ contains
     character(len=512), intent(out) :: errmsg                  ! Error message
     integer,            intent(out) :: errflg                  ! Error flag
 
+    ! Local variables
+    integer :: i, m
+
     errmsg = ''
     errflg = 0
 
+    !$acc data copyin(wsx_from_coupler, wsy_from_coupler, shf_from_coupler, cflx_from_coupler) &
+    !$acc      copyout(taux, tauy, shflux, cflux)
+
     ! Copy surface fluxes from coupler to vertical diffusion input arrays
-    taux(:ncol)    = wsx_from_coupler(:ncol)
-    tauy(:ncol)    = wsy_from_coupler(:ncol)
-    shflux(:ncol)  = shf_from_coupler(:ncol)
-    cflux(:ncol,:pcnst) = cflx_from_coupler(:ncol,:pcnst)
+    !$acc parallel loop gang vector
+    do i = 1, ncol
+      taux(i)   = wsx_from_coupler(i)
+      tauy(i)   = wsy_from_coupler(i)
+      shflux(i) = shf_from_coupler(i)
+    end do
+    !$acc parallel loop gang vector collapse(2)
+    do m = 1, pcnst
+      do i = 1, ncol
+        cflux(i, m) = cflx_from_coupler(i, m)
+      end do
+    end do
+
+    !$acc end data
 
     ! Set flag for updating residual stress to true
     itaures = .true.
