@@ -35,9 +35,9 @@ CONTAINS
         errmsg, errflg)
 
       integer,            intent(in)  :: ncol, nz
-      real(kind_phys),    intent(in)  :: temp(:,:)
-      real(kind_phys),    intent(out) :: temp_prev(:,:)
-      real(kind_phys),    intent(out) :: ttend_t(:,:)
+      real(kind_phys),    intent(in)  :: temp(ncol,nz)
+      real(kind_phys),    intent(out) :: temp_prev(ncol,nz)
+      real(kind_phys),    intent(out) :: ttend_t(ncol,nz)
       character(len=512), intent(out) :: errmsg
       integer,            intent(out) :: errflg
 
@@ -46,7 +46,6 @@ CONTAINS
       errflg = 0
 
       !   Initialize the previous temperature and its tendency to zero
-      !!$acc parallel loop collapse(2) present(temp, temp_prev, ttend_t)
       !$acc parallel loop collapse(2)
       do k=1,nz
         do i=1,ncol
@@ -65,11 +64,11 @@ CONTAINS
       integer,            intent(in)    :: nz
       integer,            intent(in)    :: ncol
       real(kind_phys),    intent(in)    :: dt             !time step
-      real(kind_phys),    intent(in)    :: theta(:,:)     !potential temperature
-      real(kind_phys),    intent(in)    :: exner(:,:)     !Exner function
-      real(kind_phys),    intent(in)    :: temp_prev(:,:) !air temperature before kessler physics
+      real(kind_phys),    intent(in)    :: theta(ncol,nz)     !potential temperature
+      real(kind_phys),    intent(in)    :: exner(ncol,nz)     !Exner function
+      real(kind_phys),    intent(in)    :: temp_prev(ncol,nz) !air temperature before kessler physics
 
-      real(kind_phys),    intent(inout) :: ttend_t(:,:)   !total air temperature tendency due to
+      real(kind_phys),    intent(inout) :: ttend_t(ncol,nz)   !total air temperature tendency due to
                                                               !kessler physics
 
       character(len=512), intent(out)   :: errmsg
@@ -102,11 +101,11 @@ CONTAINS
       ! Dummy arguments
       integer,            intent(in)    :: nz
       integer,            intent(in)    :: ncol
-      real(kind_phys),    intent(in)    :: cpair(:,:) ! Specific_heat_of_dry_air_at_constant_pressure (J/kg/K)
-      real(kind_phys),    intent(in)    :: temp(:,:)  ! Temperature
-      real(kind_phys),    intent(in)    :: zm(:,:)
-      real(kind_phys),    intent(in)    :: phis(:)
-      real(kind_phys),    intent(out)   :: st_energy(:,:)
+      real(kind_phys),    intent(in)    :: cpair(ncol,nz) ! Specific_heat_of_dry_air_at_constant_pressure (J/kg/K)
+      real(kind_phys),    intent(in)    :: temp(ncol,nz)  ! Temperature
+      real(kind_phys),    intent(in)    :: zm(ncol,nz)
+      real(kind_phys),    intent(in)    :: phis(ncol)
+      real(kind_phys),    intent(out)   :: st_energy(ncol,nz)
 
       character(len=512), intent(out)   :: errmsg
       integer,            intent(out)   :: errflg
