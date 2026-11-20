@@ -65,6 +65,7 @@ CONTAINS
 
      logical :: dosw_next
      integer :: nstepsw_next, idx
+     integer :: nday_loc, nnite_loc   ! counts, computed on the device
 
      ! Get timestep of next radiation calculation
      dosw_next = .false.
@@ -79,34 +80,45 @@ CONTAINS
         end if
      end do
      ! Gather night/day column indices.
-     nday = 0
-     nnite = 0
-     idxday = 0
-     idxnite = 0
+     ! OpenACC: the compaction depends on order (running counts), so it runs
+     ! in one device thread, the same loop as on the host: the lists are in
+     ! column order. Only the two counts return to the host (host code sizes
+     ! arrays with them); the lists stay on the device.
+     !$acc serial copyin(coszrs) copyout(idxday, idxnite, nday_loc, nnite_loc)
+     nday_loc = 0
+     nnite_loc = 0
+     do idx = 1, size(idxday)
+        idxday(idx) = 0
+     end do
+     do idx = 1, size(idxnite)
+        idxnite(idx) = 0
+     end do
      do idx = 1, ncol
         if ( coszrs(idx) > 0.0_kind_phys ) then
-           nday = nday + 1
-           idxday(nday) = idx
+           nday_loc = nday_loc + 1
+           idxday(nday_loc) = idx
         else
-           nnite = nnite + 1
-           idxnite(nnite) = idx
+           nnite_loc = nnite_loc + 1
+           idxnite(nnite_loc) = idx
         end if
      end do
+     !$acc end serial
+     nday = nday_loc
+     nnite = nnite_loc
 
   end subroutine rrtmgp_pre_timestep_init
 
 !> \section arg_table_rrtmgp_pre_run Argument Table
 !! \htmlinclude rrtmgp_pre_run.html
 !!
-  subroutine rrtmgp_pre_run(coszrs, nstep, dtime, iradsw, iradlw, irad_always, ncol, &
-                  next_cday, idxday, nday, idxnite, nnite, nlay, nlwbands, nswbands, &
+  subroutine rrtmgp_pre_run(nstep, dtime, iradsw, iradlw, irad_always, ncol, &
+                  next_cday, nday, nnite, nlay, nlwbands, nswbands, &
                   spectralflux, nextsw_cday, dosw, dolw, dosw_heat, dolw_heat, fsw,  &
                   fswc, flw, flwc, errmsg, errflg)
      use ccpp_kinds,              only: kind_phys
      use ccpp_fluxes,             only: ty_fluxes_broadband_ccpp
      use ccpp_fluxes_byband,      only: ty_fluxes_byband_ccpp
      ! Inputs
-     real(kind_phys), dimension(:),    intent(in) :: coszrs        ! Cosine solar zenith angle
      real(kind_phys),                  intent(in) :: next_cday     ! The calendar day of the next timestep
      real(kind_phys),                  intent(in) :: dtime         ! Timestep size [s]
      integer,                          intent(in) :: nstep         ! Timestep number
@@ -119,8 +131,6 @@ CONTAINS
      integer,                          intent(in) :: nswbands      ! Number of shortwave bands
      integer,                          intent(in) :: nday          ! Number of daylight columns
      integer,                          intent(in) :: nnite         ! Number of nighttime columns
-     integer, dimension(:),            intent(in) :: idxday        ! Indices of daylight columns
-     integer, dimension(:),            intent(in) :: idxnite       ! Indices of nighttime columns
      logical,                          intent(in) :: spectralflux  ! Flag to calculate fluxes (up and down) per band
      ! Outputs
      real(kind_phys),               intent(inout) :: nextsw_cday   ! The next calendar day during which calculation will be performed

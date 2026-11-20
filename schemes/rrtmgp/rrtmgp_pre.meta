@@ -134,12 +134,6 @@
 [ccpp-arg-table]
   name  = rrtmgp_pre_run
   type  = scheme
-[ coszrs ]
-  standard_name = cosine_of_solar_zenith_angle_for_radiation
-  units = 1
-  type = real | kind = kind_phys
-  dimensions = (horizontal_loop_extent)
-  intent = in
 [ nstep ]
   standard_name = current_timestep_number
   units = count
@@ -182,23 +176,11 @@
   type = real | kind = kind_phys
   dimensions = ()
   intent = in
-[ idxday ]
-  standard_name = daytime_columns
-  units = index
-  type = integer
-  dimensions = (horizontal_loop_extent)
-  intent = in
 [ nday ]
   standard_name = daytime_columns_dimension
   units = count
   type = integer
   dimensions = ()
-  intent = in
-[ idxnite ]
-  standard_name = nighttime_columns
-  units = index
-  type = integer
-  dimensions =  (horizontal_loop_extent)
   intent = in
 [ nnite ]
   standard_name = nighttime_columns_dimension
