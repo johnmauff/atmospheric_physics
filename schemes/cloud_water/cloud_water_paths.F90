@@ -73,101 +73,114 @@ contains
     integer,          intent(out) :: errflg
 
     ! Local variables
-    real(kind_phys) :: allcld_ice(ncol, pver) ! all-cloud (stratiform + convective) ice
-    real(kind_phys) :: allcld_liq(ncol, pver) ! all-cloud (stratiform + convective) liquid
+    real(kind_phys) :: allcld_ice  ! all-cloud (stratiform + convective) ice at one point
+    real(kind_phys) :: allcld_liq  ! all-cloud (stratiform + convective) liquid at one point
+    real(kind_phys) :: icimr_ik, icwmr_ik       ! in-cloud ice/liquid mixing ratio at one point
+    real(kind_phys) :: cldfsnow_ik, cldfgrau_ik ! adjusted cloud fractions at one point
     integer         :: i, k
 
     errmsg = ''
     errflg = 0
 
-    ! ==============================================================
-    ! Part A: in-cloud liquid/ice water paths for radiation.
-    ! Source: CAM cloud_diagnostics_calc, two-moment branch.
-    ! ==============================================================
+    ! OpenACC: one data region and one pointwise kernel; outputs are zero
+    ! above top_lev (as the former whole-array zero-fills), values are kept in
+    ! scalars and stored once.
+    !$acc data copyin(pmid, t, pdel, ls_liq, ls_ice, cld, concld, totg_liq, totg_ice, &
+    !$acc             qsout, qgout) &
+    !$acc      copyout(iclwp, iciwp, cldfsnow, icswp, cldfgrau, icgrauwp, &
+    !$acc              icimr, icwmr, iwc, lwc)
 
-    ! Adjust in-cloud water values to take account of convective
-    ! in-cloud water. It is used to calculate the values of
-    ! iclwp and iciwp to pass to the radiation.
-    if (conv_water_in_rad /= 0) then
-      allcld_ice(:ncol, :) = totg_ice(:ncol, :) ! Grid-avg all cloud liquid
-      allcld_liq(:ncol, :) = totg_liq(:ncol, :) ! Grid-avg all cloud ice
-    else
-      allcld_liq(:ncol, :) = 0._kind_phys
-      allcld_ice(:ncol, :) = 0._kind_phys
-      allcld_liq(:ncol, top_lev:pver) = ls_liq(:ncol, top_lev:pver)  ! Grid-avg all cloud liquid
-      allcld_ice(:ncol, top_lev:pver) = ls_ice(:ncol, top_lev:pver)  ! Grid-avg all cloud ice
-    end if
-
-    ! Compute in cloud ice and liquid mixing ratios
-    ! Note that 'iclwp, iciwp' are used for radiation computation.
-    iciwp = 0._kind_phys
-    iclwp = 0._kind_phys
-    icimr = 0._kind_phys
-    icwmr = 0._kind_phys
-    iwc = 0._kind_phys
-    lwc = 0._kind_phys
-
-    do k = top_lev, pver
+    !$acc parallel loop gang vector collapse(2) &
+    !$acc   private(allcld_ice, allcld_liq, icimr_ik, icwmr_ik, cldfsnow_ik, cldfgrau_ik)
+    do k = 1, pver
       do i = 1, ncol
+        if (k < top_lev) then
+          iciwp(i, k) = 0._kind_phys
+          iclwp(i, k) = 0._kind_phys
+          icimr(i, k) = 0._kind_phys
+          icwmr(i, k) = 0._kind_phys
+          iwc(i, k) = 0._kind_phys
+          lwc(i, k) = 0._kind_phys
+          icswp(i, k) = 0._kind_phys
+          cldfsnow(i, k) = 0._kind_phys
+          icgrauwp(i, k) = 0._kind_phys
+          cldfgrau(i, k) = 0._kind_phys
+        else
+
+        ! ==============================================================
+        ! Part A: in-cloud liquid/ice water paths for radiation.
+        ! Source: CAM cloud_diagnostics_calc, two-moment branch.
+        ! ==============================================================
+        ! Adjust in-cloud water values to take account of convective
+        ! in-cloud water. It is used to calculate the values of
+        ! iclwp and iciwp to pass to the radiation.
+        if (conv_water_in_rad /= 0) then
+          allcld_ice = totg_ice(i, k) ! Grid-avg all cloud ice
+          allcld_liq = totg_liq(i, k) ! Grid-avg all cloud liquid
+        else
+          allcld_liq = ls_liq(i, k)   ! Grid-avg all cloud liquid
+          allcld_ice = ls_ice(i, k)   ! Grid-avg all cloud ice
+        end if
+
+        ! Compute in cloud ice and liquid mixing ratios
+        ! Note that 'iclwp, iciwp' are used for radiation computation.
         ! Limits for in-cloud mixing ratios consistent with MG microphysics
         ! in-cloud mixing ratio maximum limit of 0.005 kg/kg
-        icimr(i, k) = min(allcld_ice(i, k)/max(mincld, cld(i, k)), 0.005_kind_phys)
-        icwmr(i, k) = min(allcld_liq(i, k)/max(mincld, cld(i, k)), 0.005_kind_phys)
-        iwc(i, k) = allcld_ice(i, k)*pmid(i, k)/(rair*t(i, k))
-        lwc(i, k) = allcld_liq(i, k)*pmid(i, k)/(rair*t(i, k))
+        icimr_ik = min(allcld_ice/max(mincld, cld(i, k)), 0.005_kind_phys)
+        icwmr_ik = min(allcld_liq/max(mincld, cld(i, k)), 0.005_kind_phys)
+        icimr(i, k) = icimr_ik
+        icwmr(i, k) = icwmr_ik
+        iwc(i, k) = allcld_ice*pmid(i, k)/(rair*t(i, k))
+        lwc(i, k) = allcld_liq*pmid(i, k)/(rair*t(i, k))
+
         ! Calculate total cloud water paths in each layer
-        iciwp(i, k) = icimr(i, k)*pdel(i, k)/gravit
-        iclwp(i, k) = icwmr(i, k)*pdel(i, k)/gravit
-      end do
-    end do
+        iciwp(i, k) = icimr_ik*pdel(i, k)/gravit
+        iclwp(i, k) = icwmr_ik*pdel(i, k)/gravit
 
-    ! ==============================================================
-    ! Part B: snow/graupel-adjusted cloud fractions and water paths.
-    ! Source: CAM micro_pumas_cam in-cloud diagnostics block.
-    ! ==============================================================
-    icswp = 0._kind_phys
-    cldfsnow = 0._kind_phys
-    icgrauwp = 0._kind_phys
-    cldfgrau = 0._kind_phys
-
-    do k = top_lev, pver
-      do i = 1, ncol
+        ! ==============================================================
+        ! Part B: snow/graupel-adjusted cloud fractions and water paths.
+        ! Source: CAM micro_pumas_cam in-cloud diagnostics block.
+        ! ==============================================================
         ! ------------------------------
         ! Adjust cloud fraction for snow
         ! ------------------------------
-        cldfsnow(i, k) = cld(i, k)
+        cldfsnow_ik = cld(i, k)
         ! If cloud and only ice (no convective cloud or liquid), then set to 0.
-        if ((cldfsnow(i, k) > 1.e-4_kind_phys) .and. &
+        if ((cldfsnow_ik > 1.e-4_kind_phys) .and. &
             (concld(i, k) < 1.e-4_kind_phys) .and. &
             (ls_liq(i, k) < 1.e-10_kind_phys)) then
-          cldfsnow(i, k) = 0._kind_phys
+          cldfsnow_ik = 0._kind_phys
         end if
         ! If no cloud and snow, then set to 0.25
-        if ((cldfsnow(i, k) <= 1.e-4_kind_phys) .and. (qsout(i, k) > 1.e-6_kind_phys)) then
-          cldfsnow(i, k) = 0.25_kind_phys
+        if ((cldfsnow_ik <= 1.e-4_kind_phys) .and. (qsout(i, k) > 1.e-6_kind_phys)) then
+          cldfsnow_ik = 0.25_kind_phys
         end if
+        cldfsnow(i, k) = cldfsnow_ik
         ! Calculate in-cloud snow water path
-        icswp(i, k) = qsout(i, k)/max(mincld, cldfsnow(i, k))*pdel(i, k)/gravit
+        icswp(i, k) = qsout(i, k)/max(mincld, cldfsnow_ik)*pdel(i, k)/gravit
 
         ! ---------------------------------
         ! Adjust cloud fraction for graupel
         ! ---------------------------------
-        cldfgrau(i, k) = cld(i, k)
+        cldfgrau_ik = cld(i, k)
         ! If cloud and only ice (no convective cloud or ice), then set to 0.
-        if ((cldfgrau(i, k) > 1.e-4_kind_phys) .and. &
+        if ((cldfgrau_ik > 1.e-4_kind_phys) .and. &
             (concld(i, k) < 1.e-4_kind_phys) .and. &
             (ls_liq(i, k) < 1.e-10_kind_phys)) then
-          cldfgrau(i, k) = 0._kind_phys
+          cldfgrau_ik = 0._kind_phys
         end if
         ! If no cloud and graupel, then set to 0.25
-        if ((cldfgrau(i, k) <= 1.e-4_kind_phys) .and. (qgout(i, k) > 1.e-9_kind_phys)) then
-          cldfgrau(i, k) = 0.25_kind_phys
+        if ((cldfgrau_ik <= 1.e-4_kind_phys) .and. (qgout(i, k) > 1.e-9_kind_phys)) then
+          cldfgrau_ik = 0.25_kind_phys
         end if
-
+        cldfgrau(i, k) = cldfgrau_ik
         ! Calculate in-cloud graupel water path
-        icgrauwp(i, k) = qgout(i, k)/max(mincld_grau, cldfgrau(i, k))*pdel(i, k)/gravit
+        icgrauwp(i, k) = qgout(i, k)/max(mincld_grau, cldfgrau_ik)*pdel(i, k)/gravit
+        end if
       end do
     end do
+
+    !$acc end data
 
   end subroutine cloud_water_paths_run
 

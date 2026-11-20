@@ -91,7 +91,15 @@ contains
 
     ! The below computations only write output if conv_water_in_rad = 1, 2
     ! For conv_water_in_rad = 0, assign zeros. Otherwise abort.
+    ! OpenACC: one data region; the outputs are written on the device (the
+    ! zero fill below, or the pointwise kernel), values kept in scalars.
+    !$acc data copyin(sh_frac, dp_frac, sh_icwmr, dp_icwmr, ls_ice, ls_liq, ast, rei, pdel) &
+    !$acc      copyout(totg_liq, totg_ice, conv_liq, conv_ice, tot_liq, tot_ice, &
+    !$acc              totg_liq_sh, totg_liq_dp, totg_ice_sh, totg_ice_dp, &
+    !$acc              fresh, fredp, frecu, fretot)
+
     if (conv_water_in_rad /= conv_water_arith_avg .and. conv_water_in_rad /= conv_water_emis_avg) then
+      !$acc kernels
       totg_liq(:, :) = 0._kind_phys
       totg_ice(:, :) = 0._kind_phys
       conv_liq(:, :) = 0._kind_phys
@@ -106,23 +114,28 @@ contains
       fredp(:, :) = 0._kind_phys
       frecu(:, :) = 0._kind_phys
       fretot(:, :) = 0._kind_phys
+      !$acc end kernels
       if (conv_water_in_rad /= conv_water_none) then
         errflg = 1
         errmsg = 'convective_cloud_water_run: invalid conv_water_in_rad (must be 0, 1, or 2)'
       end if
-      return
-    end if
+    else
 
     ! --------------------------------------------------------------- !
     ! Loop through grid-boxes and determine:                          !
     ! 1. Effective mean in-cloud convective ice/liquid (deep+shallow) !
     ! 2. Effective mean in-cloud total ice/liquid (ls+convective)     !
     ! --------------------------------------------------------------- !
+    !$acc kernels
     fresh(:, :) = 0._kind_phys
     fredp(:, :) = 0._kind_phys
     frecu(:, :) = 0._kind_phys
     fretot(:, :) = 0._kind_phys
+    !$acc end kernels
 
+    !$acc parallel loop gang vector collapse(2) &
+    !$acc   private(cu_icwmr, ls_icwmr, tot_icwmr, ls_frac, tot0_frac, cu0_frac, dp0_frac, &
+    !$acc           sh0_frac, kabs, kabsi, alpha, dp0, sh0, ls_ice_mass_frac)
     do k = 1, pver
       do i = 1, ncol
 
@@ -231,6 +244,10 @@ contains
 
       end do
     end do
+
+    end if
+
+    !$acc end data
 
   end subroutine convective_cloud_water_run
 
