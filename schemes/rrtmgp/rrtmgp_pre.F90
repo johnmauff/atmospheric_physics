@@ -343,12 +343,18 @@ subroutine initialize_rrtmgp_fluxes_byband(ncol, nlevels, nbands, nswbands, spec
 
    ! Fluxes by band always needed for SW.  Only allocate for LW
    ! when spectralflux is true.
+   ! The only reader without spectralflux is rrtmgp_sw_calculate_fluxes
+   ! (surface bnd_flux_dn and bnd_flux_dn_dir), so the up and net fluxes by
+   ! band, which RTE computes only when allocated, are allocated only with
+   ! spectralflux (per-band diagnostics).
    if (nbands == nswbands .or. spectralflux) then
-      allocate(fluxes%fluxes%bnd_flux_up(ncol, nlevels, nbands), stat=errflg, errmsg=alloc_errmsg)
-      if (errflg /= 0) then
-         write(errmsg, '(a,a,a)') sub, ': ERROR: failed to allocate "fluxes%fluxes%bnd_flux_up". Message: ', &
-                alloc_errmsg
-         return
+      if (spectralflux) then
+         allocate(fluxes%fluxes%bnd_flux_up(ncol, nlevels, nbands), stat=errflg, errmsg=alloc_errmsg)
+         if (errflg /= 0) then
+            write(errmsg, '(a,a,a)') sub, ': ERROR: failed to allocate "fluxes%fluxes%bnd_flux_up". Message: ', &
+                   alloc_errmsg
+            return
+         end if
       end if
       allocate(fluxes%fluxes%bnd_flux_dn(ncol, nlevels, nbands), stat=errflg, errmsg=alloc_errmsg)
       if (errflg /= 0) then
@@ -356,11 +362,13 @@ subroutine initialize_rrtmgp_fluxes_byband(ncol, nlevels, nbands, nswbands, spec
                  alloc_errmsg
          return
       end if
-      allocate(fluxes%fluxes%bnd_flux_net(ncol, nlevels, nbands), stat=errflg, errmsg=alloc_errmsg)
-      if (errflg /= 0) then
-         write(errmsg, '(a,a,a)') sub, ': ERROR: failed to allocate "fluxes%fluxes%bnd_flux_net". Message: ', &
-                 alloc_errmsg
-         return
+      if (spectralflux) then
+         allocate(fluxes%fluxes%bnd_flux_net(ncol, nlevels, nbands), stat=errflg, errmsg=alloc_errmsg)
+         if (errflg /= 0) then
+            write(errmsg, '(a,a,a)') sub, ': ERROR: failed to allocate "fluxes%fluxes%bnd_flux_net". Message: ', &
+                    alloc_errmsg
+            return
+         end if
       end if
       if (do_direct_local) then
          allocate(fluxes%fluxes%bnd_flux_dn_dir(ncol, nlevels, nbands), stat=errflg, errmsg=alloc_errmsg)
@@ -401,6 +409,7 @@ end subroutine reset_fluxes_broadband
 subroutine reset_fluxes_byband(fluxes)
    use ccpp_kinds,              only: kind_phys
    use ccpp_fluxes_byband,      only: ty_fluxes_byband_ccpp
+   use mo_rte_util_array,       only: zero_array
 
    ! Reset flux arrays to zero.
 
@@ -413,11 +422,42 @@ subroutine reset_fluxes_byband(fluxes)
    fluxes%fluxes%flux_net(:,:) = 0._kind_phys
    if (associated(fluxes%fluxes%flux_dn_dir)) fluxes%fluxes%flux_dn_dir(:,:) = 0._kind_phys
 
-   ! Reset band-by-band fluxes
-   if (associated(fluxes%fluxes%bnd_flux_up)) fluxes%fluxes%bnd_flux_up(:,:,:) = 0._kind_phys
-   if (associated(fluxes%fluxes%bnd_flux_dn)) fluxes%fluxes%bnd_flux_dn(:,:,:) = 0._kind_phys
-   if (associated(fluxes%fluxes%bnd_flux_net)) fluxes%fluxes%bnd_flux_net(:,:,:) = 0._kind_phys
-   if (associated(fluxes%fluxes%bnd_flux_dn_dir)) fluxes%fluxes%bnd_flux_dn_dir(:,:,:) = 0._kind_phys
+   ! Reset band-by-band fluxes. They are made device data and zeroed there:
+   ! RTE writes them on the device (mo_fluxes_byband sum_byband/net_byband,
+   ! copyout finds them present) and rrtmgp_sw_calculate_fluxes reads them
+   ! there, so the host copy is never needed (rrtmgp_post deletes them).
+   ! zero_array's copyout finds them present, so the zeros stay on the device
+   ! (on the host in a build without OpenACC). A zero-size array (no daylit
+   ! columns) is not created: its present-table entry would cover memory it
+   ! does not own.
+   if (associated(fluxes%fluxes%bnd_flux_up)) then
+      if (size(fluxes%fluxes%bnd_flux_up) > 0) then
+         !$acc enter data create(fluxes%fluxes%bnd_flux_up)
+         call zero_array(size(fluxes%fluxes%bnd_flux_up, 1), size(fluxes%fluxes%bnd_flux_up, 2), &
+                         size(fluxes%fluxes%bnd_flux_up, 3), fluxes%fluxes%bnd_flux_up)
+      end if
+   end if
+   if (associated(fluxes%fluxes%bnd_flux_dn)) then
+      if (size(fluxes%fluxes%bnd_flux_dn) > 0) then
+         !$acc enter data create(fluxes%fluxes%bnd_flux_dn)
+         call zero_array(size(fluxes%fluxes%bnd_flux_dn, 1), size(fluxes%fluxes%bnd_flux_dn, 2), &
+                         size(fluxes%fluxes%bnd_flux_dn, 3), fluxes%fluxes%bnd_flux_dn)
+      end if
+   end if
+   if (associated(fluxes%fluxes%bnd_flux_net)) then
+      if (size(fluxes%fluxes%bnd_flux_net) > 0) then
+         !$acc enter data create(fluxes%fluxes%bnd_flux_net)
+         call zero_array(size(fluxes%fluxes%bnd_flux_net, 1), size(fluxes%fluxes%bnd_flux_net, 2), &
+                         size(fluxes%fluxes%bnd_flux_net, 3), fluxes%fluxes%bnd_flux_net)
+      end if
+   end if
+   if (associated(fluxes%fluxes%bnd_flux_dn_dir)) then
+      if (size(fluxes%fluxes%bnd_flux_dn_dir) > 0) then
+         !$acc enter data create(fluxes%fluxes%bnd_flux_dn_dir)
+         call zero_array(size(fluxes%fluxes%bnd_flux_dn_dir, 1), size(fluxes%fluxes%bnd_flux_dn_dir, 2), &
+                         size(fluxes%fluxes%bnd_flux_dn_dir, 3), fluxes%fluxes%bnd_flux_dn_dir)
+      end if
+   end if
 
 end subroutine reset_fluxes_byband
 

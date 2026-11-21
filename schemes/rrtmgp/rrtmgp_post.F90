@@ -70,7 +70,7 @@ subroutine rrtmgp_post_run(nlay, dolw, qrs_prime, qrl_prime, fsns, pdel, atm_opt
    !$acc end data
 
    ! On the host, with the RTE objects this scheme frees below: their device
-   ! copies are a later step (rrtmgp-rte-object-residency).
+   ! copies are a later step (rrtmgp-flux-object-residency).
    if (dolw) then
       flwds(:) = flw%fluxes%flux_dn(:, nlay+1)
    end if
@@ -226,10 +226,32 @@ subroutine free_fluxes_byband(fluxes)
    if (associated(fluxes%fluxes%flux_net)) deallocate(fluxes%fluxes%flux_net)
    if (associated(fluxes%fluxes%flux_dn_dir)) deallocate(fluxes%fluxes%flux_dn_dir)
 
-   if (associated(fluxes%fluxes%bnd_flux_up)) deallocate(fluxes%fluxes%bnd_flux_up)
-   if (associated(fluxes%fluxes%bnd_flux_dn)) deallocate(fluxes%fluxes%bnd_flux_dn)
-   if (associated(fluxes%fluxes%bnd_flux_net)) deallocate(fluxes%fluxes%bnd_flux_net)
-   if (associated(fluxes%fluxes%bnd_flux_dn_dir)) deallocate(fluxes%fluxes%bnd_flux_dn_dir)
+   ! The band-by-band fluxes are device data (rrtmgp_pre
+   ! reset_fluxes_byband, which skips zero-size arrays).
+   if (associated(fluxes%fluxes%bnd_flux_up)) then
+      if (size(fluxes%fluxes%bnd_flux_up) > 0) then
+         !$acc exit data delete(fluxes%fluxes%bnd_flux_up)
+      end if
+      deallocate(fluxes%fluxes%bnd_flux_up)
+   end if
+   if (associated(fluxes%fluxes%bnd_flux_dn)) then
+      if (size(fluxes%fluxes%bnd_flux_dn) > 0) then
+         !$acc exit data delete(fluxes%fluxes%bnd_flux_dn)
+      end if
+      deallocate(fluxes%fluxes%bnd_flux_dn)
+   end if
+   if (associated(fluxes%fluxes%bnd_flux_net)) then
+      if (size(fluxes%fluxes%bnd_flux_net) > 0) then
+         !$acc exit data delete(fluxes%fluxes%bnd_flux_net)
+      end if
+      deallocate(fluxes%fluxes%bnd_flux_net)
+   end if
+   if (associated(fluxes%fluxes%bnd_flux_dn_dir)) then
+      if (size(fluxes%fluxes%bnd_flux_dn_dir) > 0) then
+         !$acc exit data delete(fluxes%fluxes%bnd_flux_dn_dir)
+      end if
+      deallocate(fluxes%fluxes%bnd_flux_dn_dir)
+   end if
 
 end subroutine free_fluxes_byband
 
