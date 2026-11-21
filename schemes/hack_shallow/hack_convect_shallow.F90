@@ -500,20 +500,21 @@ contains
     end do
 
     if(debug_verbose) then
+      ! Approximate vertical integral of moist static energy and total
+      ! precipitable water of column 1, summed on the device (pdel stays there)
+      !$acc serial copyout(hsum1, qsum1)
+      hsum1 = 0.0_kind_phys
+      qsum1 = 0.0_kind_phys
+      do k=limcnv,pver
+        hsum1 = hsum1 + pdel(1,k)*rgrav*hb(1,k)
+        qsum1 = qsum1 + pdel(1,k)*rgrav*shb(1,k)
+      end do
+      !$acc end serial
       !$acc update self(hb, shb, shbs, shbh, sbh, hbh, cmfmc_sh, cmfsl, cmflq, tb, sb, hbs, &
       !$acc             cmfdt, cmfdq, cmfdqr, prec)
       ! DEBUG DIAGNOSTICS - Output initial thermodynamic profile
       do i=1,ncol
         if(i == 1) then
-          ! Approximate vertical integral of moist static energy
-          ! and total precipitable water
-          hsum1 = 0.0_kind_phys
-          qsum1 = 0.0_kind_phys
-          do k=limcnv,pver
-            hsum1 = hsum1 + pdel(i,k)*rgrav*hb(i,k)
-            qsum1 = qsum1 + pdel(i,k)*rgrav*shb(i,k)
-          end do
-
           write(iulog,8010)
           fac = grav*864._kind_phys
           do k=limcnv,pver
@@ -981,6 +982,15 @@ contains
     end do
 
     if(debug_verbose) then
+      ! The same integrals after adjustment, summed on the device
+      !$acc serial copyout(hsum2, qsum2)
+      hsum2 = 0.0_kind_phys
+      qsum2 = 0.0_kind_phys
+      do k=limcnv,pver
+        hsum2 = hsum2 + pdel(1,k)*rgrav*hb(1,k)
+        qsum2 = qsum2 + pdel(1,k)*rgrav*shb(1,k)
+      end do
+      !$acc end serial
       !$acc update self(shb, shbs, shbh, sbh, hbh, cmfmc_sh, cmfsl, cmflq, tb, sb, hb, hbs, &
       !$acc             cmfdt, cmfdq, cmfdqr, prec)
       ! DEBUG DIAGNOSTICS - show final result
@@ -998,14 +1008,7 @@ contains
           end do
           write(iulog, 8000) prec(i)
 
-          ! approximate vertical integral of moist static energy and
-          ! total preciptable water after adjustment and output changes
-          hsum2 = 0.0_kind_phys
-          qsum2 = 0.0_kind_phys
-          do k=limcnv,pver
-            hsum2 = hsum2 + pdel(i,k)*rgrav*hb(i,k)
-            qsum2 = qsum2 + pdel(i,k)*rgrav*shb(i,k)
-          end do
+          ! output changes of the integrals
           write(iulog,8070) hsum1, hsum2, abs(hsum2-hsum1)/hsum2, &
                             qsum1, qsum2, abs(qsum2-qsum1)/qsum2
         end if
