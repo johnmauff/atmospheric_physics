@@ -80,28 +80,24 @@
   type = real | kind = kind_phys
   dimensions = (daytime_columns_dimension)
   intent = in
-  memory_space = device
 [ toa_src_sw ]
   standard_name = top_of_atmosphere_solar_radiation_flux_on_g_points
   units = W m-2
   type = real | kind = kind_phys
   dimensions = (daytime_columns_dimension,number_of_shortwave_g_point_intervals)
   intent = in
-  memory_space = device
 [ sfc_alb_dir ]
   standard_name = albedo_direct_at_surface
   units = fraction
   type = real | kind = kind_phys
   dimensions = (number_of_bands_for_shortwave_radiation,daytime_columns_dimension)
   intent = in
-  memory_space = device
 [ sfc_alb_dif ]
   standard_name = albedo_diffused_at_surface
   units = fraction
   type = real | kind = kind_phys
   dimensions = (number_of_bands_for_shortwave_radiation,daytime_columns_dimension)
   intent = in
-  memory_space = device
 [ flux_clrsky ]
   standard_name = shortwave_clear_sky_flux_object_for_RRTMGP
   units = none

@@ -80,7 +80,6 @@
   type = real | kind = kind_phys
   dimensions = (number_of_bands_for_longwave_radiation,horizontal_loop_extent)
   intent = in
-  memory_space = device
 [ lw_gas_props ]
   standard_name = longwave_gas_optics_object_for_RRTMGP
   units = none
@@ -106,7 +105,6 @@
   dimensions = (horizontal_loop_extent,number_of_longwave_g_point_intervals)
   allocatable = True
   intent = out
-  memory_space = device
 [ flux_clrsky ]
   standard_name = longwave_clear_sky_flux_object_for_RRTMGP
   units = none

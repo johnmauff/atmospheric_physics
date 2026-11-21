@@ -79,6 +79,8 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,number_of_vertical_layers_in_RRTMGP)
   intent = in
+  # memory_space = device stated here: the run passes it as a 2-D column
+  # section, x(iCol:iCol2,:), which xdsl-ccpp's source check counts as a host use
   memory_space = device
 [ p_lev ]
   standard_name = air_pressure_at_interface_for_RRTMGP
@@ -86,6 +88,8 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,number_of_vertical_interfaces_in_RRTMGP)
   intent = in
+  # memory_space = device stated here: the run passes it as a 2-D column
+  # section, x(iCol:iCol2,:), which xdsl-ccpp's source check counts as a host use
   memory_space = device
 [ t_lay ]
   standard_name = air_temperature_for_RRTMGP
@@ -93,6 +97,8 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,number_of_vertical_layers_in_RRTMGP)
   intent = in
+  # memory_space = device stated here: the run passes it as a 2-D column
+  # section, x(iCol:iCol2,:), which xdsl-ccpp's source check counts as a host use
   memory_space = device
 [ tsfg ]
   standard_name = ground_temperature_at_surface_for_radiation
@@ -100,7 +106,6 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
-  memory_space = device
 [ gas_concs ]
   standard_name = longwave_gas_volume_mixing_ratios_object_for_RRTMGP
   units = none

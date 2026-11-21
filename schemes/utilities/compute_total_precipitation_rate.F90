@@ -1,4 +1,6 @@
 ! Compute the total surface precipitation rate (deep + shallow convective + stratiform)
+!
+! OpenACC: one pointwise kernel.
 module compute_total_precipitation_rate
   implicit none
   private
@@ -21,10 +23,15 @@ contains
     character(len=*),   intent(out) :: errmsg
     integer,            intent(out) :: errflg
 
+    integer :: i
+
     errmsg = ''
     errflg = 0
 
-    prect(:ncol) = prec_dp(:ncol) + prec_sh(:ncol) + prec_str(:ncol)
+    !$acc parallel loop gang vector copyin(prec_dp, prec_sh, prec_str) copyout(prect)
+    do i = 1, ncol
+      prect(i) = prec_dp(i) + prec_sh(i) + prec_str(i)
+    end do
 
   end subroutine compute_total_precipitation_rate_run
 

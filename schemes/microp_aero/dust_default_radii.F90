@@ -1,5 +1,7 @@
 ! Set default dust radii for 4 size bins used in contact freezing.
 ! For modal aerosols, bin 3 is overwritten later with wet diameter.
+!
+! OpenACC: one fill kernel.
 module dust_default_radii
 
   use ccpp_kinds, only: kind_phys
@@ -27,13 +29,20 @@ contains
     character(len=*),   intent(out) :: errmsg
     integer,            intent(out) :: errflg
 
+    integer :: i, k
+
     errmsg = ''
     errflg = 0
 
-    rndst(:ncol, :pver, 1) = rn_dst1
-    rndst(:ncol, :pver, 2) = rn_dst2
-    rndst(:ncol, :pver, 3) = rn_dst3
-    rndst(:ncol, :pver, 4) = rn_dst4
+    !$acc parallel loop gang vector collapse(2) copyout(rndst)
+    do k = 1, pver
+      do i = 1, ncol
+        rndst(i, k, 1) = rn_dst1
+        rndst(i, k, 2) = rn_dst2
+        rndst(i, k, 3) = rn_dst3
+        rndst(i, k, 4) = rn_dst4
+      end do
+    end do
 
   end subroutine dust_default_radii_timestep_init
 
