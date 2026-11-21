@@ -341,13 +341,27 @@ contains
     character(len=512), intent(out)   :: errmsg  ! error message
     integer,            intent(out)   :: errflg  ! error flag
 
+    integer :: i, k
+
     errmsg = ''
     errflg = 0
 
-    ksrf(:ncol) = 0._kind_phys
+    !$acc data copyout(ksrf, tau_damp_rate)
+
+    !$acc parallel loop
+    do i = 1, ncol
+      ksrf(i) = 0._kind_phys
+    end do
 
     ! In most layers, no damping at all.
-    tau_damp_rate(:ncol,:pver) = 0._kind_phys
+    !$acc parallel loop collapse(2)
+    do k = 1, pver
+      do i = 1, ncol
+        tau_damp_rate(i,k) = 0._kind_phys
+      end do
+    end do
+
+    !$acc end data
 
   end subroutine vertical_diffusion_diffuse_horizontal_momentum_timestep_init
 
