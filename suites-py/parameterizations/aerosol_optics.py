@@ -8,13 +8,20 @@ aerosol_optics_scheme      = ccpp_scheme_ref("aerosol_optics")
 aerosol_optics_diagnostics = ccpp_scheme_ref("aerosol_optics_diagnostics")
 compute_relative_humidity  = ccpp_scheme_ref("compute_relative_humidity")
 aerosol_optics_zero_stub   = ccpp_scheme_ref("aerosol_optics_zero_stub")
+# Bulk aerosols only, from flattened tables (GPU capable)
+bulk_optics_sizes          = ccpp_scheme_ref("bulk_aerosol_optics_sizes")
+bulk_optics_tables         = ccpp_scheme_ref("bulk_aerosol_optics_tables")
+bulk_optics_scheme         = ccpp_scheme_ref("bulk_aerosol_optics")
 
 
 @ccpp_composite
 def bulk_aerosol_optical_properties():
     """Bulk aerosols.  The relative humidity they need comes from the cloud
-    fraction parameterization, which must run first."""
-    aerosol_optics_scheme()
+    fraction parameterization, which must run first.  The tables (init
+    only) are sized, then filled, before bulk_aerosol_optics uses them."""
+    bulk_optics_sizes()
+    bulk_optics_tables()
+    bulk_optics_scheme()
     aerosol_optics_diagnostics()
 
 

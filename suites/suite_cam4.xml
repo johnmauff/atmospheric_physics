@@ -273,8 +273,12 @@
 
     <!-- Calculate aerosol optical properties for radiation.
          This has to be after the cloud fraction parameterization for the
-         relative humidity field to be available. -->
-    <scheme>aerosol_optics</scheme>
+         relative humidity field to be available.
+         Bulk aerosols only: the tables (init only) are sized, then filled,
+         before bulk_aerosol_optics uses them. -->
+    <scheme>bulk_aerosol_optics_sizes</scheme>
+    <scheme>bulk_aerosol_optics_tables</scheme>
+    <scheme>bulk_aerosol_optics</scheme>
     <scheme>aerosol_optics_diagnostics</scheme>
 
     <!-- Radiation (RRTMGP) -->
