@@ -12,6 +12,10 @@
 !                    extinction, scattering, asymmetric scattering (SW)
 !                    and absorption (LW)
 ! Unused samples are zero.
+!
+! Adapted from aerosol_optics.F90 (Haipeng Lin, NSF-NCAR/CGD/AMP, March 2026)
+! and CAM-SIMA's src/aerosol modules (bulk_aerosol_properties_mod,
+! aerosol_mmr_host, radiative_aerosol).
 module bulk_aerosol_optics_tables
   use ccpp_kinds, only: kind_phys
 

@@ -5,6 +5,10 @@
 ! the *_aerosol_optics_mod classes), without the host's aerosol objects.
 ! Every expression keeps the order of the original so the answers are
 ! bit-for-bit.
+!
+! Adapted from aerosol_optics.F90 (Haipeng Lin, NSF-NCAR/CGD/AMP, March 2026)
+! and CAM-SIMA's src/aerosol optics modules (aerosol_optics_core,
+! hygroscopic_, insoluble_ and volcrad_aerosol_optics_mod, aerosol_mmr_host).
 module bulk_aerosol_optics
   use ccpp_kinds, only: kind_phys
 

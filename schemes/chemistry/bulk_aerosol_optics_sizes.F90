@@ -2,6 +2,8 @@
 ! bulk_aerosol_optics_tables and used by bulk_aerosol_optics.
 ! A separate scheme so that the tables, dimensioned by these sizes, can be
 ! allocated before bulk_aerosol_optics_tables fills them.
+!
+! Adapted from aerosol_optics.F90 (Haipeng Lin, NSF-NCAR/CGD/AMP, March 2026).
 module bulk_aerosol_optics_sizes
   use ccpp_kinds, only: kind_phys
 
