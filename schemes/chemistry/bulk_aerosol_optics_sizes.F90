@@ -1,7 +1,10 @@
 ! Sizes of the bulk aerosol (BAM) optics tables built by
 ! bulk_aerosol_optics_tables and used by bulk_aerosol_optics.
 ! A separate scheme so that the tables, dimensioned by these sizes, can be
-! allocated before bulk_aerosol_optics_tables fills them.
+! allocated before bulk_aerosol_optics_tables fills them. The tables hold at
+! least one (zero) aerosol: with no bulk aerosols (e.g. aquaplanet) a
+! zero-size array kept on the GPU for the whole run can collide with later
+! device data.
 !
 ! Adapted from aerosol_optics.F90 (Haipeng Lin, NSF-NCAR/CGD/AMP, March 2026).
 module bulk_aerosol_optics_sizes
@@ -16,7 +19,7 @@ contains
 
 !> \section arg_table_bulk_aerosol_optics_sizes_init Argument Table
 !! \htmlinclude bulk_aerosol_optics_sizes_init.html
-  subroutine bulk_aerosol_optics_sizes_init(num_bulk_aer, nsamples, errmsg, errflg)
+  subroutine bulk_aerosol_optics_sizes_init(num_bulk_aer, nsamples, naer_tables, errmsg, errflg)
     ! The aerosol lists and optics properties are host data read by the
     ! host (as in aerosol_optics_init); they should be passed through the
     ! CCPP in the future.
@@ -27,6 +30,7 @@ contains
 
     integer,          intent(out) :: num_bulk_aer ! number of bulk aerosols [count]
     integer,          intent(out) :: nsamples     ! samples in the optics tables [count]
+    integer,          intent(out) :: naer_tables  ! aerosols in the optics tables, at least 1 [count]
     character(len=*), intent(out) :: errmsg
     integer,          intent(out) :: errflg
 
@@ -47,6 +51,7 @@ contains
     end if
 
     num_bulk_aer = bulk_aerosol_list(id_climate)%numaerosols
+    naer_tables  = max(num_bulk_aer, 1)
 
     ! One sample at least: the insoluble tables have one per band.
     nsamples = 1

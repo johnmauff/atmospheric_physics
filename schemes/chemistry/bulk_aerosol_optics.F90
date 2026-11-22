@@ -4,7 +4,9 @@
 ! hygroscopic, insoluble and volcanic_radius optics; aerosol_optics_core and
 ! the *_aerosol_optics_mod classes), without the host's aerosol objects.
 ! Every expression keeps the order of the original so the answers are
-! bit-for-bit.
+! bit-for-bit, on the CPU and (OpenACC) the GPU: sums over aerosols and
+! levels run sequentially inside each thread (loop seq), in the original
+! order.
 !
 ! Adapted from aerosol_optics.F90 (Haipeng Lin, NSF-NCAR/CGD/AMP, March 2026)
 ! and CAM-SIMA's src/aerosol optics modules (aerosol_optics_core,
@@ -107,9 +109,13 @@ contains
     ! Local variables
     integer         :: icol, ilev, iwav, ibin
     real(kind_phys) :: mass(ncol, pver)
-    ! SW optics of each aerosol in the diagnostic band
-    real(kind_phys) :: tau_vis(ncol, pver, num_bulk_aer)
-    real(kind_phys) :: ssa_vis(ncol, pver, num_bulk_aer)
+    ! SW optics of each aerosol in the diagnostic band (never zero-size, so
+    ! no zero-size device copy is created when there are no bulk aerosols)
+    real(kind_phys) :: tau_vis(ncol, pver, max(num_bulk_aer, 1))
+    real(kind_phys) :: ssa_vis(ncol, pver, max(num_bulk_aer, 1))
+    ! odv_col_aod computed on the device (odv_col_aod itself is zero-size
+    ! without bulk aerosols, so it stays on the host)
+    real(kind_phys) :: odv(ncol, max(num_bulk_aer, 1))
     real(kind_phys) :: tau, ssa, asm, tau_lw
     real(kind_phys) :: odsum, specmmr, radius
     ! Per-species diagnostics
@@ -131,6 +137,16 @@ contains
       return
     end if
 
+    !$acc data copyin(relh, pdeldry, constituents, optics_method, idx_mmr, idx_radius, &
+    !$acc             species_class, nsamples_aer, density, hygro, refindex_re,       &
+    !$acc             refindex_im, sw_ext, sw_ssa, sw_asm, lw_abs, log_radius)        &
+    !$acc      copyout(aer_tau, aer_tau_w, aer_tau_w_g, aer_lw_abs, dustaod, sulfaod,  &
+    !$acc              bcaod, pomaod, soaaod, ssltaod, aodabsbc, burdendust,          &
+    !$acc              burdenso4, burdenbc, burdenpom, burdensoa, burdenseasalt,      &
+    !$acc              ssavis, aodvis)                                                &
+    !$acc      create(mass, tau_vis, ssa_vis, odv)
+
+    !$acc parallel loop gang vector collapse(2) default(present)
     do ilev = 1, pver
       do icol = 1, ncol
         mass(icol, ilev) = pdeldry(icol, ilev) * rga
@@ -139,6 +155,8 @@ contains
 
     ! SW: sum over the aerosols in list order, at each (column, level, band),
     ! from zero, as aerosol_optics accumulates its per-aerosol optics
+    !$acc parallel loop gang vector collapse(3) default(present) &
+    !$acc   private(specmmr, radius, tau, ssa, asm)
     do iwav = 1, nswbands
       do ilev = 1, pver
         do icol = 1, ncol
@@ -146,6 +164,7 @@ contains
           aer_tau_w(icol, ilev, iwav)   = 0._kind_phys
           aer_tau_w_g(icol, ilev, iwav) = 0._kind_phys
           if (ilev >= top_lev) then
+            !$acc loop seq
             do ibin = 1, num_bulk_aer
               specmmr = aerosol_mmr(constituents, idx_mmr(ibin), icol, ilev)
               radius  = geometric_radius(constituents, idx_radius(ibin), icol, ilev)
@@ -167,10 +186,13 @@ contains
     end do
 
     ! LW: all levels
+    !$acc parallel loop gang vector collapse(3) default(present) &
+    !$acc   private(specmmr, radius, tau_lw)
     do iwav = 1, nlwbands
       do ilev = 1, pver
         do icol = 1, ncol
           aer_lw_abs(icol, ilev, iwav) = 0._kind_phys
+          !$acc loop seq
           do ibin = 1, num_bulk_aer
             specmmr = aerosol_mmr(constituents, idx_mmr(ibin), icol, ilev)
             radius  = geometric_radius(constituents, idx_radius(ibin), icol, ilev)
@@ -189,7 +211,13 @@ contains
     ! so every sum has the original terms. Bulk aerosols hold no water
     ! (bulk_aerosol_state water_volume = 0): the wet volume is the dry
     ! volume and the water terms are zero (the water refractive index
-    ! multiplies that zero volume).
+    ! multiplies that zero volume). One thread per column.
+    !$acc parallel loop gang vector default(present)                              &
+    !$acc   private(icls, specmmr, vol, wetvol, watervol, odsum,                  &
+    !$acc           scat_dust, abs_dust, hyg_dust, scat_bc, abs_bc, hyg_bc,       &
+    !$acc           scat_sulf, abs_sulf, hyg_sulf, scat_pom, abs_pom, hyg_pom,    &
+    !$acc           scat_soa, abs_soa, hyg_soa, scat_sslt, abs_sslt, hyg_sslt,    &
+    !$acc           scath2o, absh2o, sumscat, sumabs, sumhygro, dopaer, palb, aodc)
     do icol = 1, ncol
       dustaod(icol)       = 0._kind_phys
       sulfaod(icol)       = 0._kind_phys
@@ -204,8 +232,10 @@ contains
       burdenpom(icol)     = 0._kind_phys
       burdensoa(icol)     = 0._kind_phys
       burdenseasalt(icol) = 0._kind_phys
+      !$acc loop seq
       do ibin = 1, num_bulk_aer
         icls = species_class(ibin)
+        !$acc loop seq
         do ilev = top_lev, pver
           specmmr = aerosol_mmr(constituents, idx_mmr(ibin), icol, ilev)
           vol     = specmmr / density(ibin)
@@ -288,24 +318,36 @@ contains
           end if
         end do
         odsum = 0._kind_phys
+        !$acc loop seq
         do ilev = top_lev, pver
           odsum = odsum + tau_vis(icol, ilev, ibin)
         end do
-        odv_col_aod(icol, ibin) = odsum
+        odv(icol, ibin) = odsum
       end do
 
       ssavis(icol) = ssavis_default
       aodvis(icol) = 0._kind_phys
+      !$acc loop seq
       do ilev = 1, pver
         aodvis(icol) = aodvis(icol) + aer_tau(icol, ilev, idx_sw_diag)
       end do
       if (aodvis(icol) > aodvis_min) then
         odsum = 0._kind_phys
+        !$acc loop seq
         do ilev = 1, pver
           odsum = odsum + aer_tau_w(icol, ilev, idx_sw_diag)
         end do
         ssavis(icol) = odsum / aodvis(icol)
       end if
+    end do
+
+    !$acc update self(odv)
+    !$acc end data
+
+    do ibin = 1, num_bulk_aer
+      do icol = 1, ncol
+        odv_col_aod(icol, ibin) = odv(icol, ibin)
+      end do
     end do
 
   end subroutine bulk_aerosol_optics_run
@@ -315,6 +357,7 @@ contains
   ! Mass mixing ratio of a bulk aerosol: a constituent, or zero (source Z,
   ! index 0), as the host's rad_cnst_get_aer_mmr [kg kg-1]
   pure real(kind_phys) function aerosol_mmr(constituents, idx, icol, ilev)
+    !$acc routine seq
     real(kind_phys), intent(in) :: constituents(:, :, :)
     integer,         intent(in) :: idx, icol, ilev
     if (idx > 0) then
@@ -326,6 +369,7 @@ contains
 
   ! Geometric radius of a volcanic aerosol (0 when the aerosol has none) [m]
   pure real(kind_phys) function geometric_radius(constituents, idx, icol, ilev)
+    !$acc routine seq
     real(kind_phys), intent(in) :: constituents(:, :, :)
     integer,         intent(in) :: idx, icol, ilev
     if (idx > 0) then
@@ -337,6 +381,7 @@ contains
 
   ! Relative-humidity table position (hygroscopic_aerosol_optics constructor)
   pure subroutine rh_position(relh, numrh, krh, wrh)
+    !$acc routine seq
     real(kind_phys), intent(in)  :: relh
     integer,         intent(in)  :: numrh
     integer,         intent(out) :: krh
@@ -349,6 +394,7 @@ contains
 
   ! Radius table position (volcrad_aerosol_optics constructor)
   pure subroutine radius_position(radius, nmu, ibin, log_radius, kmu, wmu)
+    !$acc routine seq
     real(kind_phys), intent(in)  :: radius
     integer,         intent(in)  :: nmu, ibin
     real(kind_phys), intent(in)  :: log_radius(:, :)
@@ -374,6 +420,7 @@ contains
   ! bulk aerosol (aerosol_optics_sw_bin with the classes' sw_props)
   pure subroutine sw_optics(method, nsamp, ibin, iwav, sw_ext, sw_ssa, sw_asm, log_radius, &
                             relh, radius, mmr, mass, tau, ssa, asm)
+    !$acc routine seq
     integer,         intent(in)  :: method, nsamp, ibin, iwav
     real(kind_phys), intent(in)  :: sw_ext(:, :, :), sw_ssa(:, :, :), sw_asm(:, :, :)
     real(kind_phys), intent(in)  :: log_radius(:, :)
@@ -423,6 +470,7 @@ contains
   ! LW absorption optical depth of one bulk aerosol (aerosol_optics_lw_bin)
   pure subroutine lw_optics(method, nsamp, ibin, iwav, lw_abs, log_radius, &
                             relh, radius, mmr, mass, tau_lw)
+    !$acc routine seq
     integer,         intent(in)  :: method, nsamp, ibin, iwav
     real(kind_phys), intent(in)  :: lw_abs(:, :, :)
     real(kind_phys), intent(in)  :: log_radius(:, :)

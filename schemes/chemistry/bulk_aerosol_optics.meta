@@ -81,85 +81,85 @@
   standard_name = bulk_aerosol_optics_method_index
   units = index
   type = integer
-  dimensions = (number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ idx_mmr ]
   standard_name = ccpp_constituent_index_of_bulk_aerosol_mass_mixing_ratio
   units = index
   type = integer
-  dimensions = (number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ idx_radius ]
   standard_name = ccpp_constituent_index_of_bulk_aerosol_geometric_mean_radius
   units = index
   type = integer
-  dimensions = (number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ species_class ]
   standard_name = bulk_aerosol_species_class_index
   units = index
   type = integer
-  dimensions = (number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ nsamples_aer ]
   standard_name = number_of_samples_in_bulk_aerosol_optics_tables_per_bulk_aerosol
   units = count
   type = integer
-  dimensions = (number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ density ]
   standard_name = density_of_bulk_aerosol
   units = kg m-3
   type = real | kind = kind_phys
-  dimensions = (number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ hygro ]
   standard_name = hygroscopicity_of_bulk_aerosol
   units = 1
   type = real | kind = kind_phys
-  dimensions = (number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ refindex_re ]
   standard_name = real_part_of_shortwave_refractive_index_of_bulk_aerosol
   units = 1
   type = real | kind = kind_phys
-  dimensions = (number_of_bands_for_shortwave_radiation, number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_bands_for_shortwave_radiation, number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ refindex_im ]
   standard_name = imaginary_part_of_shortwave_refractive_index_of_bulk_aerosol
   units = 1
   type = real | kind = kind_phys
-  dimensions = (number_of_bands_for_shortwave_radiation, number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_bands_for_shortwave_radiation, number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ sw_ext ]
   standard_name = shortwave_specific_extinction_table_of_bulk_aerosol
   units = m2 kg-1
   type = real | kind = kind_phys
-  dimensions = (number_of_samples_in_bulk_aerosol_optics_tables, number_of_bands_for_shortwave_radiation, number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_samples_in_bulk_aerosol_optics_tables, number_of_bands_for_shortwave_radiation, number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ sw_ssa ]
   standard_name = shortwave_single_scattering_albedo_or_specific_scattering_table_of_bulk_aerosol
   units = none
   type = real | kind = kind_phys
-  dimensions = (number_of_samples_in_bulk_aerosol_optics_tables, number_of_bands_for_shortwave_radiation, number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_samples_in_bulk_aerosol_optics_tables, number_of_bands_for_shortwave_radiation, number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ sw_asm ]
   standard_name = shortwave_asymmetry_parameter_or_specific_asymmetric_scattering_table_of_bulk_aerosol
   units = none
   type = real | kind = kind_phys
-  dimensions = (number_of_samples_in_bulk_aerosol_optics_tables, number_of_bands_for_shortwave_radiation, number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_samples_in_bulk_aerosol_optics_tables, number_of_bands_for_shortwave_radiation, number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ lw_abs ]
   standard_name = longwave_specific_absorption_table_of_bulk_aerosol
   units = m2 kg-1
   type = real | kind = kind_phys
-  dimensions = (number_of_samples_in_bulk_aerosol_optics_tables, number_of_bands_for_longwave_radiation, number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_samples_in_bulk_aerosol_optics_tables, number_of_bands_for_longwave_radiation, number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ log_radius ]
   standard_name = natural_log_of_geometric_mean_radius_samples_of_bulk_aerosol
   units = 1
   type = real | kind = kind_phys
-  dimensions = (number_of_samples_in_bulk_aerosol_optics_tables, number_of_bulk_aerosol_constituents_in_climate_radiative_aerosol_list)
+  dimensions = (number_of_samples_in_bulk_aerosol_optics_tables, number_of_bulk_aerosols_in_bulk_aerosol_optics_tables)
   intent = in
 [ aer_tau ]
   standard_name = shortwave_aerosol_extinction_optical_depth

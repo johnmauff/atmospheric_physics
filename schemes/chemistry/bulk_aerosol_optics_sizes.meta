@@ -17,6 +17,12 @@
   type = integer
   dimensions = ()
   intent = out
+[ naer_tables ]
+  standard_name = number_of_bulk_aerosols_in_bulk_aerosol_optics_tables
+  units = count
+  type = integer
+  dimensions = ()
+  intent = out
 [ errmsg ]
   standard_name = ccpp_error_message
   units = none
