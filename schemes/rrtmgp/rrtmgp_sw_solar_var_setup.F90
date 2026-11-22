@@ -36,6 +36,9 @@ contains
     integer :: radmax_loc
     character(len=256) :: alloc_errmsg
 
+    errmsg = ''
+    errflg = 0
+
     if ( do_spectral_scaling ) then
 
        if ( .not.has_spectrum ) then

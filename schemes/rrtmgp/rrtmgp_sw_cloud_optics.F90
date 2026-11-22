@@ -134,6 +134,9 @@ subroutine rrtmgp_sw_cloud_optics_run(dosw, ncol, pver, ktopcam, ktoprad,  nswgp
    character(len=*), parameter :: sub = 'rrtmgp_set_cloud_sw'
    !--------------------------------------------------------------------------------
 
+   errmsg = ''
+   errflg = 0
+
    if (.not. dosw) then
       return
    end if
