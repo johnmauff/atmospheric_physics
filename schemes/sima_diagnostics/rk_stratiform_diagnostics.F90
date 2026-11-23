@@ -236,10 +236,11 @@ contains
       call history_out_field('PSACIO', psacio)
 
       ! Derived diagnostics -- mass mixing ratio for stratiform or convective cloud liquid / cloud ice
-      cldliqstr(:,:) = 0._kind_phys
-      cldicestr(:,:) = 0._kind_phys
-      cldliqcon(:,:) = 0._kind_phys
-      cldicecon(:,:) = 0._kind_phys
+      ! Computed on the device into device-only locals; history_out_field
+      ! accumulates device data in place (gpu-history-accumulate).
+      !$acc data present(cloud, concld, cldliq, cldice) &
+      !$acc      create(cldliqstr, cldicestr, cldliqcon, cldicecon)
+      !$acc parallel loop collapse(2)
       do k = 1, pver
          do i = 1, ncol
             if(cloud(i,k) > 0._kind_phys) then
@@ -250,6 +251,11 @@ contains
                ! stratiform (large-scale) mass mixing ratios
                cldliqstr(i,k) = cldliq(i,k)/cloud(i,k) * (cloud(i,k) - concld(i,k))
                cldicestr(i,k) = cldice(i,k)/cloud(i,k) * (cloud(i,k) - concld(i,k))
+            else
+               cldliqcon(i,k) = 0._kind_phys
+               cldicecon(i,k) = 0._kind_phys
+               cldliqstr(i,k) = 0._kind_phys
+               cldicestr(i,k) = 0._kind_phys
             endif
          enddo
       enddo
@@ -259,6 +265,7 @@ contains
 
       call history_out_field('CLDLIQSTR', cldliqstr)
       call history_out_field('CLDICESTR', cldicestr)
+      !$acc end data
 
    end subroutine rk_stratiform_prognostic_cloud_water_tendencies_diagnostics_run
 
