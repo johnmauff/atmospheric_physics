@@ -123,6 +123,8 @@
 [ccpp-arg-table]
   name  = convect_shallow_diagnostics_after_convective_evaporation_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ ncol ]
   standard_name = horizontal_loop_extent
   units = count
@@ -165,36 +167,42 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ ntprpd ]
   standard_name = tendency_of_precipitation_wrt_moist_air_and_condensed_water_due_to_shallow_convection
   units = kg kg-1 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ ntsnprd ]
   standard_name = tendency_of_frozen_precipitation_wrt_moist_air_and_condensed_water_due_to_shallow_convection
   units = kg kg-1 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ flxprec ]
   standard_name = precipitation_flux_at_interface_due_to_shallow_convection
   units = kg m-2 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ flxsnow ]
   standard_name = frozen_precipitation_flux_at_interface_due_to_shallow_convection
   units = kg m-2 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ precc ]
   standard_name = lwe_precipitation_rate_at_surface_due_to_shallow_convection
   units = m s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ errmsg ]
   standard_name = ccpp_error_message
   units = none
@@ -215,6 +223,8 @@
 [ccpp-arg-table]
   name  = convect_shallow_diagnostics_after_sum_to_deep_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ ncol ]
   standard_name = horizontal_loop_extent
   units = count
@@ -227,6 +237,7 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ cnt ]
   standard_name = vertical_index_at_cloud_top_for_all_convection
   units = index
@@ -245,24 +256,28 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ p_cnb ]
   standard_name = pressure_at_cloud_base_for_all_convection
   units = Pa
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ qc_total ]
   standard_name = detrainment_of_cloud_liquid_water_wrt_moist_air_and_condensed_water_due_to_all_convection
   units = kg kg-1 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ qc_sh ]
   standard_name = detrainment_of_cloud_liquid_water_wrt_moist_air_and_condensed_water_due_to_shallow_convection
   units = kg kg-1 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ errmsg ]
   standard_name = ccpp_error_message
   units = none

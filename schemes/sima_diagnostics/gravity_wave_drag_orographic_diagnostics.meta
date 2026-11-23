@@ -21,6 +21,8 @@
 [ccpp-arg-table]
   name  = gravity_wave_drag_orographic_diagnostics_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ cpair ]
   standard_name = specific_heat_of_dry_air_at_constant_pressure
   units = J kg-1 K-1
@@ -33,24 +35,28 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ utgw ]
   standard_name = tendency_of_eastward_wind_due_to_orographic_gravity_wave_drag
   units = m s-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ vtgw ]
   standard_name = tendency_of_northward_wind_due_to_orographic_gravity_wave_drag
   units = m s-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ ttgw ]
   standard_name = tendency_of_air_temperature_due_to_orographic_gravity_wave_drag
   units = K s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ dttdf ]
   standard_name = tendency_of_dry_air_enthalpy_at_constant_pressure_due_to_diffusion_due_to_orographic_gravity_wave_drag
   units = J kg-1 s-1
@@ -69,12 +75,14 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ tau0y ]
   standard_name = northward_stress_at_surface_due_to_orographic_gravity_wave_drag
   units = N m-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ errmsg ]
   standard_name = ccpp_error_message
   units = none

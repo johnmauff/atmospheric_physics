@@ -21,24 +21,29 @@
 [ccpp-arg-table]
   name  = sima_tend_diagnostics_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ dTdt_total ]
   standard_name = tendency_of_air_temperature_due_to_model_physics
   units = K s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ dudt_total ]
   standard_name = tendency_of_eastward_wind_due_to_model_physics
   units = m s-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ dvdt_total ]
   standard_name = tendency_of_northward_wind_due_to_model_physics
   units = m s-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ errmsg ]
   standard_name = ccpp_error_message
   units = none

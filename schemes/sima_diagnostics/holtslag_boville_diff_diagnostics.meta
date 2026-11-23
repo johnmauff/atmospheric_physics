@@ -21,66 +21,78 @@
 [ccpp-arg-table]
   name  = holtslag_boville_diff_diagnostics_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ ri ]
   standard_name = gradient_richardson_number
   units = 1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ ustar ]
   standard_name = surface_friction_velocity
   units = m s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ obklen ]
   standard_name = obukhov_length
   units = m
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ pblh ]
   standard_name = atmosphere_boundary_layer_thickness
   units = m
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ kvh ]
   standard_name = eddy_heat_diffusivity_at_interfaces
   units = m2 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ kvm ]
   standard_name = eddy_momentum_diffusivity_at_interfaces
   units = m2 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ cgs ]
   standard_name = counter_gradient_coefficient_for_vertical_diffusion_of_constituents_at_interfaces
   units = s m-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ tke ]
   standard_name = tke_at_interfaces
   units = m2 s-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ tpert ]
   standard_name = convective_temperature_perturbation_due_to_pbl_eddies
   units = K
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ qpert ]
   standard_name = convective_water_vapor_mixing_ratio_wrt_moist_air_and_condensed_water_perturbation_due_to_pbl_eddies
   units = kg kg-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ errmsg ]
   standard_name = ccpp_error_message
   units = none

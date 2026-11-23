@@ -21,24 +21,29 @@
 [ccpp-arg-table]
   name  = convective_cloud_cover_diagnostics_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ shallowcu ]
   standard_name = shallow_convective_cloud_area_fraction
   units = fraction
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ deepcu ]
   standard_name = deep_convective_cloud_area_fraction
   units = fraction
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ concld ]
   standard_name = convective_cloud_area_fraction
   units = fraction
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ errmsg ]
   standard_name = ccpp_error_message
   units = none

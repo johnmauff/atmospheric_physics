@@ -21,12 +21,15 @@
 [ccpp-arg-table]
   name  = compute_cloud_fraction_diagnostics_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ cldst ]
   standard_name = stratiform_cloud_area_fraction
   units = fraction
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ errmsg ]
   standard_name = ccpp_error_message
   units = none
