@@ -114,7 +114,7 @@ contains
     real(kind_phys) :: tau_vis(ncol, pver, max(num_bulk_aer, 1))
     real(kind_phys) :: ssa_vis(ncol, pver, max(num_bulk_aer, 1))
     ! odv_col_aod computed on the device (odv_col_aod itself is zero-size
-    ! without bulk aerosols, so it stays on the host)
+    ! without bulk aerosols; it is copied from odv only when it is not)
     real(kind_phys) :: odv(ncol, max(num_bulk_aer, 1))
     real(kind_phys) :: tau, ssa, asm, tau_lw
     real(kind_phys) :: odsum, specmmr, radius
@@ -341,14 +341,21 @@ contains
       end if
     end do
 
-    !$acc update self(odv)
-    !$acc end data
-
-    do ibin = 1, num_bulk_aer
-      do icol = 1, ncol
-        odv_col_aod(icol, ibin) = odv(icol, ibin)
+    ! odv_col_aod from odv on the device: aerosol_optics_diagnostics reads it
+    ! there. Without bulk aerosols odv_col_aod is zero-size and gets no
+    ! device copy (a zero-size present-table entry would cover memory it
+    ! does not own).
+    if (num_bulk_aer > 0) then
+      !$acc data copyout(odv_col_aod)
+      !$acc parallel loop gang vector collapse(2)
+      do ibin = 1, num_bulk_aer
+        do icol = 1, ncol
+          odv_col_aod(icol, ibin) = odv(icol, ibin)
+        end do
       end do
-    end do
+      !$acc end data
+    end if
+    !$acc end data
 
   end subroutine bulk_aerosol_optics_run
 
