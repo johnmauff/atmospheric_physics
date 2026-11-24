@@ -69,7 +69,7 @@ CONTAINS
       use cam_history,        only: history_out_field
       use ccpp_fluxes,        only: ty_fluxes_broadband_ccpp
       use ccpp_fluxes_byband, only: ty_fluxes_byband_ccpp
-      use atmos_phys_interp_utils, only: vertinterp
+      use atmos_phys_interp_utils, only: vertinterp_column
       !------------------------------------------------
       !   Input / output parameters
       !------------------------------------------------
@@ -101,11 +101,14 @@ CONTAINS
       integer,            intent(out) :: errflg
 
       ! Local variables
-      integer :: diag_index, idx
+      integer :: diag_index, i, k, nbad
+      logical :: ok200, ok200c, okr
       real(kind_phys) :: fln200(ncol)
       real(kind_phys) :: fln200c(ncol)
       real(kind_phys) :: flnr(ncol)
       real(kind_phys) :: lwcf(ncol)
+      real(kind_phys) :: qrl_cp(size(qrl,1), size(qrl,2))   ! qrl/cpair
+      real(kind_phys) :: qrlc_cp(size(qrlc,1), size(qrlc,2)) ! qrlc/cpair
 
       errmsg = ''
       errflg = 0
@@ -123,51 +126,92 @@ CONTAINS
          return
       end if
 
-      ! History out field calls
-      call history_out_field('QRL'//diag(diag_index),     qrl(:,:)/cpair)
-      call history_out_field('QRLC'//diag(diag_index),    qrlc(:,:)/cpair)
+      ! Everything below runs on the device: the inputs are device data, the
+      ! flux object arrays too (rrtmgp_pre), and every field goes to the
+      ! history buffer as a device array (a local created here, a contiguous
+      ! section of an input, or a flux array section). The flux arrays are
+      ! only read through plain-array dummies (difference_at_level), not as
+      ! components in a kernel (nvfortran "partially present").
+      !$acc data present(pint, p_trop, fnl, fcnl, qrl, qrlc) &
+      !$acc      create(qrl_cp, qrlc_cp, lwcf, fln200, fln200c, flnr)
 
-      call history_out_field('FLNT'//diag(diag_index),    fnl(:,ktopcam))
-      call history_out_field('FLNTC'//diag(diag_index),   fcnl(:,ktopcam))
-
-      call history_out_field('FLUT'//diag(diag_index),    flw%fluxes%flux_up(:, ktoprad))
-      call history_out_field('FLUTC'//diag(diag_index),   flwc%fluxes%flux_up(:, ktoprad))
-
-      lwcf(:) = flwc%fluxes%flux_up(:, ktoprad) - flw%fluxes%flux_up(:, ktoprad)
-      call history_out_field('LWCF'//diag(diag_index),    lwcf)
-
-      ! Output fluxes at 200 mb
-      call vertinterp(ncol, ncol, pverp, pint, 20000._kind_phys, fnl,  fln200, errmsg, errflg)
-      if (errflg /= 0) then
-         return
-      end if
-      call vertinterp(ncol, ncol, pverp, pint, 20000._kind_phys, fcnl, fln200c, errmsg, errflg)
-      if (errflg /= 0) then
-         return
-      end if
-      call history_out_field('FLN200'//diag(diag_index),  fln200)
-      call history_out_field('FLN200C'//diag(diag_index), fln200c)
-
-      do idx = 1,ncol
-         call vertinterp(1, 1, pverp, pint(idx,:), p_trop(idx), fnl(idx,:), flnr(idx), errmsg, errflg)
-         if (errflg /= 0) then
-            return
-         end if
+      !$acc parallel loop collapse(2)
+      do k = 1, size(qrl, 2)
+         do i = 1, size(qrl, 1)
+            qrl_cp(i,k) = qrl(i,k)/cpair
+            qrlc_cp(i,k) = qrlc(i,k)/cpair
+         end do
       end do
-      call history_out_field('FLNR'//diag(diag_index),    flnr)
 
-      call history_out_field('FLNS'//diag(diag_index),    fnl(:,pverp))
-      call history_out_field('FLNSC'//diag(diag_index),   fcnl(:,pverp))
+      call difference_at_level(flwc%fluxes%flux_up, flw%fluxes%flux_up, ktoprad, lwcf)
 
-      call history_out_field('FLDS'//diag(diag_index),    flw%fluxes%flux_dn(:, nlay+1))
-      call history_out_field('FLDSC'//diag(diag_index),   flwc%fluxes%flux_dn(:, nlay+1))
+      ! FLN200 and FLNR (vertinterp, default method, one column at a time)
+      nbad = 0
+      !$acc parallel loop reduction(+:nbad)
+      do i = 1, ncol
+         call vertinterp_column(i, pverp, pint, 20000._kind_phys, fnl,  fln200(i),  ok200)
+         call vertinterp_column(i, pverp, pint, 20000._kind_phys, fcnl, fln200c(i), ok200c)
+         call vertinterp_column(i, pverp, pint, p_trop(i),        fnl,  flnr(i),    okr)
+         if (.not. (ok200 .and. ok200c .and. okr)) nbad = nbad + 1
+      end do
 
-      ! Fluxes on the CAM grid
-      call history_out_field('FDL'//diag(diag_index),     flw%fluxes%flux_dn( :, ktoprad:))
-      call history_out_field('FDLC'//diag(diag_index),    flwc%fluxes%flux_dn(:, ktoprad:))
-      call history_out_field('FUL'//diag(diag_index),     flw%fluxes%flux_up( :, ktoprad:))
-      call history_out_field('FULC'//diag(diag_index),    flwc%fluxes%flux_up(:, ktoprad:))
+      if (nbad == 0) then
+         ! History out field calls
+         call history_out_field('QRL'//diag(diag_index),     qrl_cp)
+         call history_out_field('QRLC'//diag(diag_index),    qrlc_cp)
+
+         call history_out_field('FLNT'//diag(diag_index),    fnl(:,ktopcam))
+         call history_out_field('FLNTC'//diag(diag_index),   fcnl(:,ktopcam))
+
+         call history_out_field('FLUT'//diag(diag_index),    flw%fluxes%flux_up(:, ktoprad))
+         call history_out_field('FLUTC'//diag(diag_index),   flwc%fluxes%flux_up(:, ktoprad))
+
+         call history_out_field('LWCF'//diag(diag_index),    lwcf)
+
+         call history_out_field('FLN200'//diag(diag_index),  fln200)
+         call history_out_field('FLN200C'//diag(diag_index), fln200c)
+
+         call history_out_field('FLNR'//diag(diag_index),    flnr)
+
+         call history_out_field('FLNS'//diag(diag_index),    fnl(:,pverp))
+         call history_out_field('FLNSC'//diag(diag_index),   fcnl(:,pverp))
+
+         call history_out_field('FLDS'//diag(diag_index),    flw%fluxes%flux_dn(:, nlay+1))
+         call history_out_field('FLDSC'//diag(diag_index),   flwc%fluxes%flux_dn(:, nlay+1))
+
+         call history_out_field('FDL'//diag(diag_index),     flw%fluxes%flux_dn( :, ktoprad:))
+         call history_out_field('FDLC'//diag(diag_index),    flwc%fluxes%flux_dn(:, ktoprad:))
+         call history_out_field('FUL'//diag(diag_index),     flw%fluxes%flux_up( :, ktoprad:))
+         call history_out_field('FULC'//diag(diag_index),    flwc%fluxes%flux_up(:, ktoprad:))
+      end if
+
+      !$acc end data
+
+      if (nbad > 0) then
+         errmsg = 'VERTINTERP: output pressure not bracketed by the input levels'
+         errflg = 1
+      end if
 
    end subroutine rrtmgp_lw_diagnostics_run
+
+   !=========================================================================================
+
+   subroutine difference_at_level(flux_a, flux_b, ilev, diff)
+      ! diff(:) = flux_a(:, ilev) - flux_b(:, ilev) on the device (all present)
+      real(kind_phys), intent(in)  :: flux_a(:,:)
+      real(kind_phys), intent(in)  :: flux_b(:,:)
+      integer,         intent(in)  :: ilev
+      real(kind_phys), intent(out) :: diff(:)
+
+      integer :: i
+
+      !$acc data present(flux_a, flux_b, diff)
+      !$acc parallel loop
+      do i = 1, size(diff)
+         diff(i) = flux_a(i, ilev) - flux_b(i, ilev)
+      end do
+      !$acc end data
+
+   end subroutine difference_at_level
 
 end module rrtmgp_lw_diagnostics

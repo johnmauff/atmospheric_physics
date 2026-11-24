@@ -69,10 +69,16 @@ subroutine rrtmgp_post_run(nlay, dolw, qrs_prime, qrl_prime, fsns, pdel, atm_opt
    end do
    !$acc end data
 
-   ! On the host, with the RTE objects this scheme frees below: their device
-   ! copies are a later step (rrtmgp-flux-object-residency).
+   ! Downward longwave flux at the surface, on the device: the broadband
+   ! flux arrays are device data (rrtmgp_pre reset_broadband_components).
+   ! The flux component goes to a plain-array routine, not indexed in a
+   ! kernel as a component of an RTE type (nvfortran "partially present").
+   ! The clause names flw like rrtmgp_lw_calculate_fluxes does; the
+   ! component is already present, so only the object's descriptor moves.
    if (dolw) then
-      flwds(:) = flw%fluxes%flux_dn(:, nlay+1)
+      !$acc data copyin(flw%fluxes, flw%fluxes%flux_dn) copy(flwds)
+      call set_surface_flux(flw%fluxes%flux_dn, nlay+1, flwds)
+      !$acc end data
    end if
 
    ! RTE-RRTMGP checks its input values (check_values: range checks of
@@ -207,12 +213,69 @@ subroutine free_fluxes_broadband(fluxes)
 
    class(ty_fluxes_broadband_ccpp), intent(inout) :: fluxes
 
-   if (associated(fluxes%fluxes%flux_up)) deallocate(fluxes%fluxes%flux_up)
-   if (associated(fluxes%fluxes%flux_dn)) deallocate(fluxes%fluxes%flux_dn)
-   if (associated(fluxes%fluxes%flux_net)) deallocate(fluxes%fluxes%flux_net)
-   if (associated(fluxes%fluxes%flux_dn_dir)) deallocate(fluxes%fluxes%flux_dn_dir)
+   call free_broadband_components(fluxes%fluxes)
 
 end subroutine free_fluxes_broadband
+
+!=========================================================================================
+
+subroutine free_broadband_components(fluxes)
+   use mo_fluxes,              only: ty_fluxes_broadband
+
+   ! The broadband flux arrays are device data (rrtmgp_pre
+   ! reset_broadband_components, which skips zero-size arrays); also the
+   ! broadband part of a by-band flux object, which extends this type.
+
+   class(ty_fluxes_broadband), intent(inout) :: fluxes
+
+   if (associated(fluxes%flux_up)) then
+      if (size(fluxes%flux_up) > 0) then
+         !$acc exit data delete(fluxes%flux_up)
+      end if
+      deallocate(fluxes%flux_up)
+   end if
+   if (associated(fluxes%flux_dn)) then
+      if (size(fluxes%flux_dn) > 0) then
+         !$acc exit data delete(fluxes%flux_dn)
+      end if
+      deallocate(fluxes%flux_dn)
+   end if
+   if (associated(fluxes%flux_net)) then
+      if (size(fluxes%flux_net) > 0) then
+         !$acc exit data delete(fluxes%flux_net)
+      end if
+      deallocate(fluxes%flux_net)
+   end if
+   if (associated(fluxes%flux_dn_dir)) then
+      if (size(fluxes%flux_dn_dir) > 0) then
+         !$acc exit data delete(fluxes%flux_dn_dir)
+      end if
+      deallocate(fluxes%flux_dn_dir)
+   end if
+
+end subroutine free_broadband_components
+
+!=========================================================================================
+
+subroutine set_surface_flux(flux, ilev, sfc_flux)
+   use ccpp_kinds,             only: kind_phys
+
+   ! sfc_flux(:) = flux(:, ilev) on the device (both present).
+
+   real(kind_phys), intent(in)    :: flux(:,:)
+   integer,         intent(in)    :: ilev
+   real(kind_phys), intent(inout) :: sfc_flux(:)
+
+   integer :: i
+
+   !$acc data present(flux, sfc_flux)
+   !$acc parallel loop
+   do i = 1, size(sfc_flux)
+      sfc_flux(i) = flux(i, ilev)
+   end do
+   !$acc end data
+
+end subroutine set_surface_flux
 
 !=========================================================================================
 
@@ -221,10 +284,7 @@ subroutine free_fluxes_byband(fluxes)
 
    class(ty_fluxes_byband_ccpp), intent(inout) :: fluxes
 
-   if (associated(fluxes%fluxes%flux_up)) deallocate(fluxes%fluxes%flux_up)
-   if (associated(fluxes%fluxes%flux_dn)) deallocate(fluxes%fluxes%flux_dn)
-   if (associated(fluxes%fluxes%flux_net)) deallocate(fluxes%fluxes%flux_net)
-   if (associated(fluxes%fluxes%flux_dn_dir)) deallocate(fluxes%fluxes%flux_dn_dir)
+   call free_broadband_components(fluxes%fluxes)
 
    ! The band-by-band fluxes are device data (rrtmgp_pre
    ! reset_fluxes_byband, which skips zero-size arrays).

@@ -23,6 +23,7 @@ module atmos_phys_interp_utils
    public :: lininterp
    public :: lininterp_finish
    public :: vertinterp
+   public :: vertinterp_column
 
    type interp_type
       real(kind_phys), pointer :: wgts(:)
@@ -755,5 +756,60 @@ contains
       end function extrapolate_Z
 
    end subroutine vertinterp
+
+   !=========================================================================================
+
+   subroutine vertinterp_column(icol, nlev, pin, pout, arrin, arrout, bracketed)
+      !$acc routine seq
+
+      ! vertinterp for one column (icol) and its default method only: linear
+      ! interpolation in pressure, the top value above pin(icol,1), the
+      ! bottom value below pin(icol,nlev), no extrapolation. Same search,
+      ! branches and arithmetic as vertinterp, so the same bits; callable
+      ! from device code. bracketed is .false. where vertinterp reports
+      ! "output pressure not bracketed" (arrout is then 0); the caller
+      ! raises that error.
+
+      integer,         intent(in)  :: icol         ! column index
+      integer,         intent(in)  :: nlev         ! vertical dimension
+      real(kind_phys), intent(in)  :: pin(:,:)     ! input pressure levels (col, nlev)
+      real(kind_phys), intent(in)  :: pout         ! output pressure level
+      real(kind_phys), intent(in)  :: arrin(:,:)   ! input array (col, nlev)
+      real(kind_phys), intent(out) :: arrout       ! interpolated value
+      logical,         intent(out) :: bracketed
+
+      integer         :: k
+      integer         :: kupper   ! level index for interpolation
+      logical         :: found    ! true if input levels found
+      real(kind_phys) :: dpu      ! upper level pressure difference
+      real(kind_phys) :: dpl      ! lower level pressure difference
+
+      found  = .false.
+      kupper = 1
+      do k = 1, nlev - 1
+         if ((.not. found) .and. pin(icol,k) < pout .and. pout <= pin(icol,k+1)) then
+            found  = .true.
+            kupper = k
+         end if
+      end do
+
+      bracketed = .true.
+      if (pout <= pin(icol,1)) then
+         ! above top pressure level: value at top (no interpolation)
+         arrout = arrin(icol,1)
+      else if (pout >= pin(icol,nlev)) then
+         ! below bottom pressure level: bottom value
+         arrout = arrin(icol,nlev)
+      else if (found) then
+         ! linear interpolation in p
+         dpu = pout - pin(icol,kupper)
+         dpl = pin(icol,kupper+1) - pout
+         arrout = (arrin(icol,kupper)*dpl + arrin(icol,kupper+1)*dpu)/(dpl + dpu)
+      else
+         arrout = 0._kind_phys
+         bracketed = .false.
+      end if
+
+   end subroutine vertinterp_column
 
 end module atmos_phys_interp_utils

@@ -388,7 +388,6 @@ end subroutine initialize_rrtmgp_fluxes_byband
 !=========================================================================================
 
 subroutine reset_fluxes_broadband(fluxes)
-   use ccpp_kinds,              only: kind_phys
    use ccpp_fluxes,             only: ty_fluxes_broadband_ccpp
 
    ! Reset flux arrays to zero.
@@ -396,18 +395,58 @@ subroutine reset_fluxes_broadband(fluxes)
    class(ty_fluxes_broadband_ccpp), intent(inout) :: fluxes
    !----------------------------------------------------------------------------
 
-   ! Reset broadband fluxes
-   fluxes%fluxes%flux_up(:,:) = 0._kind_phys
-   fluxes%fluxes%flux_dn(:,:) = 0._kind_phys
-   fluxes%fluxes%flux_net(:,:) = 0._kind_phys
-   if (associated(fluxes%fluxes%flux_dn_dir)) fluxes%fluxes%flux_dn_dir(:,:) = 0._kind_phys
+   call reset_broadband_components(fluxes%fluxes)
 
 end subroutine reset_fluxes_broadband
 
 !=========================================================================================
 
+subroutine reset_broadband_components(fluxes)
+   use mo_fluxes,               only: ty_fluxes_broadband
+   use mo_rte_util_array,       only: zero_array
+
+   ! Make the broadband flux arrays device data and zero them there (also the
+   ! broadband part of a by-band flux object, which extends this type). RTE
+   ! writes them on the device (mo_fluxes reduce: sum_broadband/net_broadband,
+   ! copyout finds them present), rrtmgp_sw/lw_calculate_fluxes and
+   ! rrtmgp_post read them there, and rrtmgp_post deletes them. zero_array's
+   ! copyout finds them present, so the zeros stay on the device (on the host
+   ! in a build without OpenACC). A zero-size array (no daylit columns) is
+   ! not created: its present-table entry would cover memory it does not own.
+
+   class(ty_fluxes_broadband), intent(inout) :: fluxes
+   !----------------------------------------------------------------------------
+
+   if (associated(fluxes%flux_up)) then
+      if (size(fluxes%flux_up) > 0) then
+         !$acc enter data create(fluxes%flux_up)
+         call zero_array(size(fluxes%flux_up, 1), size(fluxes%flux_up, 2), fluxes%flux_up)
+      end if
+   end if
+   if (associated(fluxes%flux_dn)) then
+      if (size(fluxes%flux_dn) > 0) then
+         !$acc enter data create(fluxes%flux_dn)
+         call zero_array(size(fluxes%flux_dn, 1), size(fluxes%flux_dn, 2), fluxes%flux_dn)
+      end if
+   end if
+   if (associated(fluxes%flux_net)) then
+      if (size(fluxes%flux_net) > 0) then
+         !$acc enter data create(fluxes%flux_net)
+         call zero_array(size(fluxes%flux_net, 1), size(fluxes%flux_net, 2), fluxes%flux_net)
+      end if
+   end if
+   if (associated(fluxes%flux_dn_dir)) then
+      if (size(fluxes%flux_dn_dir) > 0) then
+         !$acc enter data create(fluxes%flux_dn_dir)
+         call zero_array(size(fluxes%flux_dn_dir, 1), size(fluxes%flux_dn_dir, 2), fluxes%flux_dn_dir)
+      end if
+   end if
+
+end subroutine reset_broadband_components
+
+!=========================================================================================
+
 subroutine reset_fluxes_byband(fluxes)
-   use ccpp_kinds,              only: kind_phys
    use ccpp_fluxes_byband,      only: ty_fluxes_byband_ccpp
    use mo_rte_util_array,       only: zero_array
 
@@ -416,11 +455,8 @@ subroutine reset_fluxes_byband(fluxes)
    class(ty_fluxes_byband_ccpp), intent(inout) :: fluxes
    !----------------------------------------------------------------------------
 
-   ! Reset broadband fluxes
-   fluxes%fluxes%flux_up(:,:) = 0._kind_phys
-   fluxes%fluxes%flux_dn(:,:) = 0._kind_phys
-   fluxes%fluxes%flux_net(:,:) = 0._kind_phys
-   if (associated(fluxes%fluxes%flux_dn_dir)) fluxes%fluxes%flux_dn_dir(:,:) = 0._kind_phys
+   ! Reset broadband fluxes (device data, as for a broadband flux object)
+   call reset_broadband_components(fluxes%fluxes)
 
    ! Reset band-by-band fluxes. They are made device data and zeroed there:
    ! RTE writes them on the device (mo_fluxes_byband sum_byband/net_byband,

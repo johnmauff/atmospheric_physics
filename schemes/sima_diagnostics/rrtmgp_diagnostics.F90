@@ -66,7 +66,10 @@ CONTAINS
          return
       end if
 
-      ! Compute heating rate for dtheta/dt
+      ! Compute heating rate for dtheta/dt (on the device; the history buffer
+      ! accumulates the device copy)
+      !$acc data present(qrs, qrl, pmid) create(net_heating_rate)
+      !$acc parallel loop collapse(2)
       do kdx = 1, pver
          do idx = 1, ncol
             net_heating_rate(idx,kdx) = (qrs(idx,kdx) + qrl(idx,kdx))/cpair * (1.e5_kind_phys/pmid(idx,kdx))**cappa
@@ -74,6 +77,7 @@ CONTAINS
       end do
 
       call history_out_field('HR', net_heating_rate)
+      !$acc end data
 
    end subroutine rrtmgp_diagnostics_run
 
