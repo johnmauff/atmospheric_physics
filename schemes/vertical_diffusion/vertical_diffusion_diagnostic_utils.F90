@@ -142,10 +142,24 @@ contains
 
     rdt = 1.0_kind_phys / dt
 
+    ! OpenACC: every computation runs on the device when the caller's data is
+    ! device-resident (gpu-history-accumulate); elementwise, same arithmetic.
+    !$acc data present(pint, pmid, zi, zm, kvh, kvm, cgh, cgs, cam_in_shf, &
+    !$acc              cam_in_cflx_wv, cam_in_cflx_cldliq, cam_in_cflx_cldice, &
+    !$acc              tautotx, tautoty, t0, q0_wv, q0_cldliq, q0_cldice, s0, u0, v0, &
+    !$acc              s1, tend_s, tend_u, tend_v, tend_q_wv, tend_q_cldliq, &
+    !$acc              tend_q_cldice, qt_pre_PBL, sl_pre_PBL, slv_pre_PBL, rh_pre_PBL, &
+    !$acc              qt_aft_PBL, sl_aft_PBL, slv_aft_PBL, qv_aft_PBL, ql_aft_PBL, &
+    !$acc              qi_aft_PBL, t_aft_PBL, rh_aft_PBL, u_aft_PBL, v_aft_PBL, slten, &
+    !$acc              qtten, tten, rhten, slflx, qtflx, uflx, vflx, slflx_cg, &
+    !$acc              qtflx_cg, uflx_cg, vflx_cg) &
+    !$acc      create(sat_pre, sat_aft, tem2_pre, tem2_aft, s_aft_PBL)
+
     ! ====================================================
     ! Compute profiles before vertical diffusion (pre-PBL)
     ! ====================================================
 
+    !$acc kernels
     ! Liquid water static energy before PBL
     sl_pre_PBL(:ncol, :pver) = s0(:ncol, :pver) &
                                - latvap * q0_cldliq(:ncol, :pver) &
@@ -159,16 +173,21 @@ contains
     ! Virtual liquid water static energy before PBL
     slv_pre_PBL(:ncol, :pver) = sl_pre_PBL(:ncol, :pver) &
                                 * (1.0_kind_phys + zvir * qt_pre_PBL(:ncol, :pver))
+    !$acc end kernels
 
     ! Compute saturation vapor pressure and relative humidity before PBL.
     ! qsat per point (qsat_line) on the host: this diagnostic runs on the
     ! host, and the vector qsat would copy each level to the GPU and back.
+    ! On the device, qsat_line is an acc routine seq.
+    !$acc parallel loop collapse(2)
     do k = 1, pver
        do i = 1, ncol
           call qsat(t0(i, k), pmid(i, k), tem2_pre(i, k), sat_pre(i, k))
        end do
     end do
+    !$acc kernels
     rh_pre_PBL(:ncol, :pver) = q0_wv(:ncol, :pver) / sat_pre(:ncol, :pver) * 100.0_kind_phys
+    !$acc end kernels
 
     ! ====================================================
     ! Compute profiles after vertical diffusion (post-PBL)
@@ -178,6 +197,7 @@ contains
     !
     ! Note: this is indeed computed twice because at the point this utility subroutine runs,
     ! the tendencies have not yet been applied.
+    !$acc kernels
     qv_aft_PBL(:ncol, :pver) = q0_wv(:ncol, :pver)     + tend_q_wv(:ncol, :pver)     * dt
     ql_aft_PBL(:ncol, :pver) = q0_cldliq(:ncol, :pver) + tend_q_cldliq(:ncol, :pver) * dt
     qi_aft_PBL(:ncol, :pver) = q0_cldice(:ncol, :pver) + tend_q_cldice(:ncol, :pver) * dt
@@ -203,14 +223,17 @@ contains
 
     ! Temperature after PBL (derived from dry static energy)
     t_aft_PBL(:ncol, :pver) = (s_aft_PBL(:ncol, :pver) - gravit * zm(:ncol, :pver)) / cpair
+    !$acc end kernels
 
     ! Compute saturation vapor pressure and relative humidity after PBL
-    ! (qsat per point on the host, as above)
+    ! (qsat per point, as above)
+    !$acc parallel loop collapse(2)
     do k = 1, pver
        do i = 1, ncol
           call qsat(t_aft_PBL(i, k), pmid(i, k), tem2_aft(i, k), sat_aft(i, k))
        end do
     end do
+    !$acc kernels
     rh_aft_PBL(:ncol, :pver) = qv_aft_PBL(:ncol, :pver) / sat_aft(:ncol, :pver) * 100.0_kind_phys
 
     ! ====================================================
@@ -242,8 +265,10 @@ contains
     qtflx_cg(:ncol, 1) = 0.0_kind_phys
     uflx_cg(:ncol, 1)  = 0.0_kind_phys
     vflx_cg(:ncol, 1)  = 0.0_kind_phys
+    !$acc end kernels
 
     ! Compute fluxes at model interfaces
+    !$acc parallel loop collapse(2) private(rhoair)
     do k = 2, pver
        do i = 1, ncol
           ! Air density at interface k [kg m-3]
@@ -277,6 +302,7 @@ contains
     end do
 
     ! Set fluxes at bottom interface using surface fluxes
+    !$acc kernels
     slflx(:ncol, pverp)    = cam_in_shf(:ncol)
     qtflx(:ncol, pverp)    = cam_in_cflx_wv(:ncol)
     uflx(:ncol, pverp)     = tautotx(:ncol)
@@ -285,6 +311,8 @@ contains
     qtflx_cg(:ncol, pverp) = 0.0_kind_phys
     uflx_cg(:ncol, pverp)  = 0.0_kind_phys
     vflx_cg(:ncol, pverp)  = 0.0_kind_phys
+    !$acc end kernels
+    !$acc end data
 
   end subroutine vertical_diffusion_diagnostic_profiles
 

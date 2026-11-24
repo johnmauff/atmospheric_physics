@@ -51,14 +51,22 @@ CONTAINS
 
 
       real(kind_phys) :: ftem(ncol,pver)
+      integer :: i, k
 
       errmsg = ''
       errflg = 0
 
-      ftem(:,:) = 0._kind_phys
-
-      ftem(:ncol,:pver) = heat(:ncol,:pver)/cpair
+      ! Runs on the device: history_out_field accumulates device data in
+      ! place (gpu-history-accumulate). Same arithmetic as before.
+      !$acc data present(heat) create(ftem)
+      !$acc parallel loop collapse(2)
+      do k = 1, pver
+         do i = 1, ncol
+            ftem(i,k) = heat(i,k)/cpair
+         end do
+      end do
       call history_out_field('ZMDT    ', ftem)
+      !$acc end data
       call history_out_field('ZMDQ    ', qtnd)
 
    end subroutine zm_convr_tendency_diagnostics_run

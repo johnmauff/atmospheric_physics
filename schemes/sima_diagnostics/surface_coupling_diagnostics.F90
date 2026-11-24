@@ -83,17 +83,28 @@ contains
     ! Local variables
     real(kind_phys) :: precc(ncol)   ! Total convective precipitation rate [m s-1]
     real(kind_phys) :: precsc(ncol)  ! Total convective snow rate [m s-1]
+    real(kind_phys) :: prect(ncol)   ! Total precipitation rate [m s-1]
+    integer :: i
 
     errmsg = ''
     errflg = 0
 
-    precc(:)  = prec_dp(:) + prec_sh(:)
-    precsc(:) = snow_dp(:) + snow_sh(:)
+    ! Runs on the device: history_out_field accumulates device data in
+    ! place (gpu-history-accumulate). Same arithmetic as before.
+    !$acc data present(prec_dp, prec_sh, snow_dp, snow_sh, prec_str) &
+    !$acc      create(precc, precsc, prect)
+    !$acc parallel loop
+    do i = 1, ncol
+      precc(i)  = prec_dp(i) + prec_sh(i)
+      precsc(i) = snow_dp(i) + snow_sh(i)
+      prect(i)  = precc(i) + prec_str(i)
+    end do
 
     call history_out_field('PRECC',  precc)
     call history_out_field('PRECL',  prec_str)
-    call history_out_field('PRECT',  precc(:) + prec_str(:))
+    call history_out_field('PRECT',  prect)
     call history_out_field('PRECSC', precsc)
+    !$acc end data
     call history_out_field('PRECSL', snow_str)
 
     call history_out_field('SHFLX',  shf)

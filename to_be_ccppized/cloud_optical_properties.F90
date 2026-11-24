@@ -169,33 +169,51 @@ contains
                                            !    2nd region, etc
                                            ! (ncol, pverp)
 
-    integer  :: i, k
+    integer  :: i, k, kk
+    integer  :: npm                  ! Number of pmxrgn levels (pverp)
     integer  :: n                    ! Max-overlap region counter
-    real(r8) :: pnm(ncol, pverp)     ! Interface pressure
     logical  :: cld_found            ! Flag for detection of cloud
-    logical  :: cld_layer(pver)      ! Flag for cloud in layer
+    logical  :: cld_below            ! Cloud in a layer below the current one
 
+    ! Runs on the device in OpenACC builds; callers pass device-resident data.
+    ! Same comparisons and pint*10 as the original column loop (which kept
+    ! cld_layer/pnm work arrays), so results are bit-for-bit.
+    npm = size(pmxrgn, 2)
+    !$acc data present(pint, cld, nmxrgn, pmxrgn)
+    !$acc parallel loop gang vector private(n, cld_found, cld_below)
     do i = 1, ncol
       cld_found = .false.
-      cld_layer(:) = cld(i, :) > 0.0_r8
-      pmxrgn(i, :) = 0.0_r8
-      pnm(i, :) = pint(i, :)*10._r8
+      !$acc loop seq
+      do k = 1, npm
+        pmxrgn(i, k) = 0.0_r8
+      end do
       n = 1
+      !$acc loop seq
       do k = 1, pver
-        if (cld_layer(k) .and. .not. cld_found) then
+        if (cld(i, k) > 0.0_r8 .and. .not. cld_found) then
           cld_found = .true.
-        else if (.not. cld_layer(k) .and. cld_found) then
+        else if (.not. (cld(i, k) > 0.0_r8) .and. cld_found) then
           cld_found = .false.
-          if (count(cld_layer(k:pver)) == 0) then
+          ! Stop when no layer below this one is cloudy
+          cld_below = .false.
+          !$acc loop seq
+          do kk = k + 1, pver
+            if (cld(i, kk) > 0.0_r8) then
+              cld_below = .true.
+              exit
+            end if
+          end do
+          if (.not. cld_below) then
             exit
           end if
-          pmxrgn(i, n) = pnm(i, k)
+          pmxrgn(i, n) = pint(i, k)*10._r8
           n = n + 1
         end if
       end do
-      pmxrgn(i, n) = pnm(i, pverp)
+      pmxrgn(i, n) = pint(i, pverp)*10._r8
       nmxrgn(i) = n
     end do
+    !$acc end data
   end subroutine cldovrlap
 
   ! Evaluate cloud liquid water path clwp [g m-2]

@@ -69,6 +69,9 @@ contains
     character(len=512), intent(out) :: errmsg
     integer,            intent(out) :: errflg
 
+    real(kind_phys) :: ftem(size(dttdf,1), size(dttdf,2)) ! tendency in K s-1
+    integer :: i, k
+
     errmsg = ''
     errflg = 0
 
@@ -81,8 +84,24 @@ contains
     ! Output temperature tendencies from diffusion (convert from J/kg/s to K/s)
     ! Note: this uses cpair instead of cpairv (inconsistent with ttgw, but consistent with other gw schemes).
     ! Also see atmospheric_physics issue #320.
-    call history_out_field('TTGWSDFORO', dttdf / cpair)
-    call history_out_field('TTGWSKEORO', dttke / cpair)
+    ! Runs on the device: history_out_field accumulates device data in
+    ! place (gpu-history-accumulate). Same arithmetic as before.
+    !$acc data present(dttdf, dttke) create(ftem)
+    !$acc parallel loop collapse(2)
+    do k = 1, size(ftem,2)
+      do i = 1, size(ftem,1)
+        ftem(i,k) = dttdf(i,k) / cpair
+      end do
+    end do
+    call history_out_field('TTGWSDFORO', ftem)
+    !$acc parallel loop collapse(2)
+    do k = 1, size(ftem,2)
+      do i = 1, size(ftem,1)
+        ftem(i,k) = dttke(i,k) / cpair
+      end do
+    end do
+    call history_out_field('TTGWSKEORO', ftem)
+    !$acc end data
 
     call history_out_field('TAUGWX', tau0x)
     call history_out_field('TAUGWY', tau0y)

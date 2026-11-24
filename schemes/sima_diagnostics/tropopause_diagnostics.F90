@@ -133,17 +133,15 @@ contains
     errmsg = ' '
     errflg = 0
 
+    ! Runs on the device: inputs are device-resident, the per-algorithm fields
+    ! are device-only locals reused for each algorithm, and history_out_field
+    ! accumulates device data in place (gpu-history-accumulate).
+    !$acc data present(zm, tropLev, tropZ, tropLev_twmo, tropLev_cpp, tropZ_cpp, &
+    !$acc              tropLev_clim, tropZ_clim) &
+    !$acc      create(tropFound, tropDZ, tropPdf)
+
     ! Default algorithm output
-    tropPdf(:,:) = 0._kind_phys
-    tropFound(:) = 0._kind_phys
-    tropDZ(:,:) = fillvalue
-    do i = 1, ncol
-      if (tropLev(i) /= NOTFOUND) then
-        tropPdf(i, tropLev(i)) = 1._kind_phys
-        tropFound(i) = 1._kind_phys
-        tropDZ(i,:) = zm(i,:) - tropZ(i)
-      end if
-    end do
+    call trop_level_fields(ncol, pver, tropLev, tropZ, zm, tropPdf, tropFound, tropDZ)
 
     call history_out_field('TROP_P',  tropP)
     call history_out_field('TROP_T',  tropT)
@@ -153,16 +151,7 @@ contains
     call history_out_field('TROP_FD', tropFound)
 
     ! Primary-only (currently TWMO) algorithm output
-    tropPdf(:,:) = 0._kind_phys
-    tropFound(:) = 0._kind_phys
-    tropDZ(:,:) = fillvalue
-    do i = 1, ncol
-      if (tropLev_twmo(i) /= NOTFOUND) then
-        tropPdf(i, tropLev_twmo(i)) = 1._kind_phys
-        tropFound(i) = 1._kind_phys
-        tropDZ(i,:) = zm(i,:) - tropZ(i)
-      end if
-    end do
+    call trop_level_fields(ncol, pver, tropLev_twmo, tropZ, zm, tropPdf, tropFound, tropDZ)
 
     call history_out_field('TROPP_P',  tropP_twmo)
     call history_out_field('TROPP_T',  tropT_twmo)
@@ -172,16 +161,7 @@ contains
     call history_out_field('TROPP_FD', tropFound)
 
     ! Cold point output
-    tropPdf(:,:) = 0._kind_phys
-    tropFound(:) = 0._kind_phys
-    tropDZ(:,:) = fillvalue
-    do i = 1, ncol
-      if (tropLev_cpp(i) /= NOTFOUND) then
-        tropPdf(i, tropLev_cpp(i)) = 1._kind_phys
-        tropFound(i) = 1._kind_phys
-        tropDZ(i,:) = zm(i,:) - tropZ_cpp(i)
-      end if
-    end do
+    call trop_level_fields(ncol, pver, tropLev_cpp, tropZ_cpp, zm, tropPdf, tropFound, tropDZ)
 
     call history_out_field('TROPF_P',  tropP_cpp)
     call history_out_field('TROPF_T',  tropT_cpp)
@@ -191,16 +171,7 @@ contains
     call history_out_field('TROPF_FD', tropFound)
 
     ! Climatology output
-    tropPdf(:,:) = 0._kind_phys
-    tropFound(:) = 0._kind_phys
-    tropDZ(:,:) = fillvalue
-    do i = 1, ncol
-      if (tropLev_clim(i) /= NOTFOUND) then
-        tropPdf(i, tropLev_clim(i)) = 1._kind_phys
-        tropFound(i) = 1._kind_phys
-        tropDZ(i,:) = zm(i,:) - tropZ_clim(i)
-      end if
-    end do
+    call trop_level_fields(ncol, pver, tropLev_clim, tropZ_clim, zm, tropPdf, tropFound, tropDZ)
 
     call history_out_field('TROPC_P',  tropP_clim)
     call history_out_field('TROPC_T',  tropT_clim)
@@ -213,6 +184,43 @@ contains
     call history_out_field('hstobie_trop',   hstobie_trop)
     call history_out_field('hstobie_linoz',  hstobie_linoz)
     call history_out_field('hstobie_tropop', hstobie_tropop)
+    !$acc end data
 
   end subroutine tropopause_diagnostics_run
+
+  !> Fill the per-algorithm diagnostics for tropopause level <lev> and height
+  !! <z_trop> on the device (same values as the former inline host loops).
+  subroutine trop_level_fields(ncol, pver, lev, z_trop, zm, tropPdf, tropFound, tropDZ)
+    use cam_history_support,  only: fillvalue
+
+    integer,         intent(in)  :: ncol
+    integer,         intent(in)  :: pver
+    integer,         intent(in)  :: lev(:)
+    real(kind_phys), intent(in)  :: z_trop(:)
+    real(kind_phys), intent(in)  :: zm(:,:)
+    real(kind_phys), intent(out) :: tropPdf(:,:)
+    real(kind_phys), intent(out) :: tropFound(:)
+    real(kind_phys), intent(out) :: tropDZ(:,:)
+
+    integer :: i, k
+
+    !$acc parallel loop present(lev, z_trop, zm, tropPdf, tropFound, tropDZ)
+    do i = 1, ncol
+      tropFound(i) = 0._kind_phys
+      !$acc loop seq
+      do k = 1, pver
+        tropPdf(i, k) = 0._kind_phys
+        tropDZ(i, k) = fillvalue
+      end do
+      if (lev(i) /= NOTFOUND) then
+        tropPdf(i, lev(i)) = 1._kind_phys
+        tropFound(i) = 1._kind_phys
+        !$acc loop seq
+        do k = 1, pver
+          tropDZ(i, k) = zm(i, k) - z_trop(i)
+        end do
+      end if
+    end do
+
+  end subroutine trop_level_fields
 end module tropopause_diagnostics

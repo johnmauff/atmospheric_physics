@@ -60,19 +60,39 @@ CONTAINS
       character(len=256) :: standard_name
 
       real(kind_phys) :: ftem(ncol,pver)
+      integer :: i, k
 
       errmsg = ''
 
       errflg = 0
 
-   ftem(:ncol,:pver) = heat(:ncol,:pver)/cpair
+   ! Runs on the device: history_out_field accumulates device data in
+   ! place (gpu-history-accumulate). Same arithmetic as before.
+   !$acc data present(heat, tend_s_snwprd, tend_s_snwevmlt) create(ftem)
+   !$acc parallel loop collapse(2)
+   do k = 1, pver
+      do i = 1, ncol
+         ftem(i,k) = heat(i,k)/cpair
+      end do
+   end do
    call history_out_field('EVAPTZM ',ftem)
-   ftem(:ncol,:pver) = tend_s_snwprd  (:ncol,:pver)/cpair
+   !$acc parallel loop collapse(2)
+   do k = 1, pver
+      do i = 1, ncol
+         ftem(i,k) = tend_s_snwprd(i,k)/cpair
+      end do
+   end do
    call history_out_field('FZSNTZM ',ftem)
-   ftem(:ncol,:pver) = tend_s_snwevmlt(:ncol,:pver)/cpair
+   !$acc parallel loop collapse(2)
+   do k = 1, pver
+      do i = 1, ncol
+         ftem(i,k) = tend_s_snwevmlt(i,k)/cpair
+      end do
+   end do
    call history_out_field('EVSNTZM ',ftem)
-   call history_out_field('EVAPQZM ',qtnd)
    call history_out_field('ZMEIHEAT', heat)
+   !$acc end data
+   call history_out_field('EVAPQZM ',qtnd)
 
    end subroutine zm_evap_tendency_diagnostics_run
 

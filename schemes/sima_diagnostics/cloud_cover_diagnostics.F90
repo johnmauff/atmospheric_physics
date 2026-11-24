@@ -76,6 +76,8 @@ contains
 
       ! Partition each column into maximally-overlapped regions of
       ! contiguous cloudy layers, then collapse to cover diagnostics.
+      !$acc data present(pint, pmid, cld) &
+      !$acc      create(nmxrgn, pmxrgn, cldtot, cldlow, cldmed, cldhgh)
       call cldovrlap(ncol, pver, pverp, pint, cld, nmxrgn, pmxrgn)
       call cldsav(ncol, pver, cld, pmid, cldtot, cldlow, cldmed, cldhgh, nmxrgn, pmxrgn)
 
@@ -84,6 +86,7 @@ contains
       call history_out_field('CLDLOW', cldlow)
       call history_out_field('CLDMED', cldmed)
       call history_out_field('CLDHGH', cldhgh)
+      !$acc end data
 
    end subroutine cloud_cover_diagnostics_run
 
@@ -93,8 +96,12 @@ contains
    ! Note: pmxrgn from cldovrlap uses the CAMRT-lineage factor of 10 (dyn cm-2)
    ! relative to pmid [Pa]; kept as is for bit-for-bit parity with CAM.
    !
+   ! Runs on the device in OpenACC builds (inputs and outputs present).
+   ! Each column is independent, so the per-column kernels below do the same
+   ! operations in the same order as the original (ityp, k, i) loops.
+   !
    ! Original author: W. Collins
-   pure subroutine cldsav(ncol, pver, cld, pmid, cldtot, cldlow, cldmed, cldhgh, nmxrgn, pmxrgn)
+   subroutine cldsav(ncol, pver, cld, pmid, cldtot, cldlow, cldmed, cldhgh, nmxrgn, pmxrgn)
 
       ! Input arguments
       integer,         intent(in) :: ncol           ! number of atmospheric columns
@@ -116,53 +123,62 @@ contains
 
       ! Local workspace
       integer  :: i,k                    ! Longitude,level indices
-      integer  :: irgn(ncol)             ! Max-overlap region index
+      integer  :: irgn                   ! Max-overlap region index
       integer  :: max_nmxrgn             ! maximum value of nmxrgn over columns
       integer  :: ityp                   ! Type counter
-      real(kind_phys) :: clrsky(ncol)    ! Max-random clear sky fraction
-      real(kind_phys) :: clrskymax(ncol) ! Maximum overlap clear sky fraction
+      real(kind_phys) :: clrsky          ! Max-random clear sky fraction
+      real(kind_phys) :: clrskymax       ! Maximum overlap clear sky fraction
+      real(kind_phys) :: pmin, pmax      ! Pressure range of this cloud type
       real(kind_phys) :: ptypmin(4)
       real(kind_phys) :: ptypmax(4)
 
       ptypmin = [phghmin, plowmin, pmedmin, phghmin]
       ptypmax = [plowmax, plowmax, pmedmax, phghmax]
 
+      !$acc data present(cld, pmid, pmxrgn, nmxrgn, cldtot, cldlow, cldmed, cldhgh)
+
       ! Initialize region number
       max_nmxrgn = -1
+      !$acc parallel loop gang vector reduction(max:max_nmxrgn)
       do i=1,ncol
          max_nmxrgn = max(max_nmxrgn,nmxrgn(i))
       end do
 
       do ityp = 1, 4
-         irgn(1:ncol) = 1
-         do k =1,max_nmxrgn-1
-            do i=1,ncol
-               if (pmxrgn(i,irgn(i)) < ptypmin(ityp) .and. irgn(i) < nmxrgn(i)) then
-                  irgn(i) = irgn(i) + 1
+         pmin = ptypmin(ityp)
+         pmax = ptypmax(ityp)
+         !$acc parallel loop gang vector private(irgn, clrsky, clrskymax)
+         do i=1,ncol
+            irgn = 1
+            !$acc loop seq
+            do k =1,max_nmxrgn-1
+               if (pmxrgn(i,irgn) < pmin .and. irgn < nmxrgn(i)) then
+                  irgn = irgn + 1
                end if
             end do
-         end do
 
-         ! Compute cloud amount by estimating clear-sky amounts
-         clrsky(1:ncol)    = 1.0_kind_phys
-         clrskymax(1:ncol) = 1.0_kind_phys
-         do k = 1, pver
-            do i=1,ncol
-               if (pmid(i,k) >= ptypmin(ityp) .and. pmid(i,k) <= ptypmax(ityp)) then
-                  if (pmxrgn(i,irgn(i)) < pmid(i,k) .and. irgn(i) < nmxrgn(i)) then
-                     irgn(i) = irgn(i) + 1
-                     clrsky(i) = clrsky(i) * clrskymax(i)
-                     clrskymax(i) = 1.0_kind_phys
+            ! Compute cloud amount by estimating clear-sky amounts
+            clrsky    = 1.0_kind_phys
+            clrskymax = 1.0_kind_phys
+            !$acc loop seq
+            do k = 1, pver
+               if (pmid(i,k) >= pmin .and. pmid(i,k) <= pmax) then
+                  if (pmxrgn(i,irgn) < pmid(i,k) .and. irgn < nmxrgn(i)) then
+                     irgn = irgn + 1
+                     clrsky = clrsky * clrskymax
+                     clrskymax = 1.0_kind_phys
                   end if
-                  clrskymax(i) = min(clrskymax(i),1.0_kind_phys-cld(i,k))
+                  clrskymax = min(clrskymax,1.0_kind_phys-cld(i,k))
                end if
             end do
+            if (ityp == 1) cldtot(i) = 1.0_kind_phys - (clrsky * clrskymax)
+            if (ityp == 2) cldlow(i) = 1.0_kind_phys - (clrsky * clrskymax)
+            if (ityp == 3) cldmed(i) = 1.0_kind_phys - (clrsky * clrskymax)
+            if (ityp == 4) cldhgh(i) = 1.0_kind_phys - (clrsky * clrskymax)
          end do
-         if (ityp == 1) cldtot(1:ncol) = 1.0_kind_phys - (clrsky(1:ncol) * clrskymax(1:ncol))
-         if (ityp == 2) cldlow(1:ncol) = 1.0_kind_phys - (clrsky(1:ncol) * clrskymax(1:ncol))
-         if (ityp == 3) cldmed(1:ncol) = 1.0_kind_phys - (clrsky(1:ncol) * clrskymax(1:ncol))
-         if (ityp == 4) cldhgh(1:ncol) = 1.0_kind_phys - (clrsky(1:ncol) * clrskymax(1:ncol))
       end do
+
+      !$acc end data
 
    end subroutine cldsav
 

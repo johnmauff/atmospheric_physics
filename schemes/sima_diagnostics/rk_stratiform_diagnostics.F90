@@ -310,6 +310,11 @@ contains
 
       ! Prognostic cloud water diagnostics
       ! needs updated cloud fraction
+      ! Runs on the device: history_out_field accumulates device data in
+      ! place (gpu-history-accumulate). Same arithmetic as before.
+      !$acc data present(cldice, cldliq, pmid, t, rhcloud) &
+      !$acc      create(iwc, lwc, icimr, icwmr)
+      !$acc parallel loop collapse(2)
       do k = 1, pver
          do i = 1, ncol
             iwc(i,k)   = cldice(i,k)*pmid(i,k)/(rair*t(i,k))
@@ -323,6 +328,7 @@ contains
       call history_out_field('LWC', lwc)
       call history_out_field('ICIMR', icimr)
       call history_out_field('ICWMR', icwmr)
+      !$acc end data
 
       ! Cloud optical properties
       call history_out_field('REL', rel)

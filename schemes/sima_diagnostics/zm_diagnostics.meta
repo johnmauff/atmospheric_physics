@@ -23,6 +23,8 @@
 [ccpp-arg-table]
   name  = zm_diagnostics_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ ncol ]
   standard_name = horizontal_loop_extent
   units = count
@@ -59,12 +61,14 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ cape ]
   standard_name = zhang_mcfarlane_convective_available_potential_energy
   units = J kg-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ gravit ]
   standard_name = standard_gravitational_acceleration
   units = m s-2
@@ -89,6 +93,7 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ ps ]
   standard_name = surface_air_pressure
   units = Pa
@@ -119,78 +124,91 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ flxsnow ]
   standard_name = frozen_precipitation_flux_at_interface_due_to_deep_convection
   units = kg m-2 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ ntprprd ]
   standard_name = tendency_of_precipitation_wrt_moist_air_and_condensed_water_due_to_deep_convection
   units = kg kg-1 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ ntsnprd ]
   standard_name = tendency_of_frozen_precipitation_wrt_moist_air_and_condensed_water_due_to_deep_convection
   units = kg kg-1 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ pguallu ]
   standard_name = tendency_of_eastward_wind_due_to_zhang_mcfarlane_deep_convective_updraft_pressure_gradient_term
   units = m s-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ pguallv ]
   standard_name = tendency_of_northward_wind_due_to_zhang_mcfarlane_deep_convective_updraft_pressure_gradient_term
   units = m s-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ pgdallu ]
   standard_name = tendency_of_eastward_wind_due_to_zhang_mcfarlane_deep_convective_downdraft_pressure_gradient_term
   units = m s-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ pgdallv ]
   standard_name = tendency_of_northward_wind_due_to_zhang_mcfarlane_deep_convective_downdraft_pressure_gradient_term
   units = m s-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ icwuu ]
   standard_name = in_cloud_eastward_wind_in_updraft_due_to_deep_convection
   units = m s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ icwuv ]
   standard_name = in_cloud_northward_wind_in_updraft_due_to_deep_convection
   units = m s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ icwdu ]
   standard_name = in_cloud_eastward_wind_in_downdraft_due_to_deep_convection
   units = m s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ icwdv ]
   standard_name = in_cloud_northward_wind_in_downdraft_due_to_deep_convection
   units = m s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ mcon ]
   standard_name = atmosphere_convective_mass_flux_due_to_deep_convection
   units = kg m-2 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ errmsg ]
   standard_name = ccpp_error_message
   long_name = Error message for error handling in CCPP

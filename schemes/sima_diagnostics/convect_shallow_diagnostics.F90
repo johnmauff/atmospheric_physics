@@ -133,6 +133,8 @@ contains
 
     ! Local variables
     real(kind_phys)                 :: freqsh(ncol)            ! Fractional occurrence of shallow convection [fraction]
+    real(kind_phys)                 :: cmfdt_k(size(cmfdt,1), size(cmfdt,2)) ! cmfdt in K s-1
+    integer                         :: k
     integer                         :: const_wv_idx, const_cldliq_idx, const_cldice_idx
     character(len=512)              :: const_standard_name
     integer                         :: i, m
@@ -161,7 +163,16 @@ contains
 
     ! CMFDT - temperature tendency
     ! Calculate temperature tendency from specific heat flux [K s-1]
-    call history_out_field('CMFDT', cmfdt(:,:)/cpair)
+    ! Runs on the device: history_out_field accumulates device data in
+    ! place (gpu-history-accumulate). Same arithmetic as before.
+    !$acc data present(cmfdt, cmfmc_sh) create(cmfdt_k, freqsh)
+    !$acc parallel loop collapse(2)
+    do k = 1, size(cmfdt,2)
+      do i = 1, size(cmfdt,1)
+        cmfdt_k(i,k) = cmfdt(i,k)/cpair
+      end do
+    end do
+    call history_out_field('CMFDT', cmfdt_k)
 
     ! Constituent tendencies
     if (const_wv_idx > 0) then
@@ -178,13 +189,19 @@ contains
     call history_out_field('CMFDQR', cmfdqr)
 
     ! Calculate fractional occurrence of shallow convection
-    freqsh(:) = 0._kind_phys
+    ! maxval(cmfmc_sh(i,:)) > 0 <=> some level of the column is > 0
+    !$acc parallel loop
     do i = 1, ncol
-      if(maxval(cmfmc_sh(i,:)) > 0._kind_phys) then
-        freqsh(i) = 1._kind_phys
-      endif
+      freqsh(i) = 0._kind_phys
+      !$acc loop seq
+      do k = 1, size(cmfmc_sh,2)
+        if (cmfmc_sh(i,k) > 0._kind_phys) then
+          freqsh(i) = 1._kind_phys
+        endif
+      enddo
     enddo
     call history_out_field('FREQSH', freqsh)
+    !$acc end data
 
     call history_out_field('DQP',     qc_sh)
     call history_out_field('ICWMRSH', icwmr)
@@ -224,20 +241,46 @@ contains
     character(len=512),  intent(out) :: errmsg
     integer,             intent(out) :: errflg
 
+    ! Local variables
+    real(kind_phys) :: ftem(size(tend_s,1), size(tend_s,2)) ! temperature tendency [K s-1]
+    integer         :: i, k
+
     errmsg = ''
     errflg = 0
 
     ! Temperature tendencies from energy tendencies
     ! (converted from J kg-1 s-1 to K s-1)
-    call history_out_field('EVAPTCM', tend_s(:,:)/cpair)
-    call history_out_field('FZSNTCM', tend_s_snwprd(:,:)/cpair)
-    call history_out_field('EVSNTCM', tend_s_snwevmlt(:,:)/cpair)
+    ! Runs on the device: history_out_field accumulates device data in
+    ! place (gpu-history-accumulate). Same arithmetic as before.
+    !$acc data present(tend_s, tend_s_snwprd, tend_s_snwevmlt) create(ftem)
+    !$acc parallel loop collapse(2)
+    do k = 1, size(ftem,2)
+      do i = 1, size(ftem,1)
+        ftem(i,k) = tend_s(i,k)/cpair
+      end do
+    end do
+    call history_out_field('EVAPTCM', ftem)
+    !$acc parallel loop collapse(2)
+    do k = 1, size(ftem,2)
+      do i = 1, size(ftem,1)
+        ftem(i,k) = tend_s_snwprd(i,k)/cpair
+      end do
+    end do
+    call history_out_field('FZSNTCM', ftem)
+    !$acc parallel loop collapse(2)
+    do k = 1, size(ftem,2)
+      do i = 1, size(ftem,1)
+        ftem(i,k) = tend_s_snwevmlt(i,k)/cpair
+      end do
+    end do
+    call history_out_field('EVSNTCM', ftem)
 
     call history_out_field('HKNTPRPD', ntprpd)
     call history_out_field('HKNTSNPD', ntsnprd)
     call history_out_field('HKFLXPRC', flxprec)
     call history_out_field('HKFLXSNW', flxsnow)
     call history_out_field('HKEIHEAT', tend_s)
+    !$acc end data
     call history_out_field('EVAPQCM',  tend_q)
     call history_out_field('PRECSH',   precc)
 
@@ -267,12 +310,29 @@ contains
     character(len=512), intent(out) :: errmsg
     integer,            intent(out) :: errflg
 
+    ! Local variables
+    real(kind_phys) :: cldtop(size(cnt))   ! cnt as real [1]
+    real(kind_phys) :: cldbot(size(cnb))   ! cnb as real [1]
+    integer         :: i
+
     errmsg = ''
     errflg = 0
 
     call history_out_field('CMFMC',   cmfmc)
-    call history_out_field('CLDTOP',  real(cnt, kind_phys))
-    call history_out_field('CLDBOT',  real(cnb, kind_phys))
+    ! Runs on the device: history_out_field accumulates device data in
+    ! place (gpu-history-accumulate). Same values as before.
+    !$acc data present(cnt, cnb) create(cldtop, cldbot)
+    !$acc parallel loop
+    do i = 1, size(cnt)
+      cldtop(i) = real(cnt(i), kind_phys)
+    end do
+    !$acc parallel loop
+    do i = 1, size(cnb)
+      cldbot(i) = real(cnb(i), kind_phys)
+    end do
+    call history_out_field('CLDTOP',  cldtop)
+    call history_out_field('CLDBOT',  cldbot)
+    !$acc end data
     call history_out_field('PCLDTOP', p_cnt)
     call history_out_field('PCLDBOT', p_cnb)
 

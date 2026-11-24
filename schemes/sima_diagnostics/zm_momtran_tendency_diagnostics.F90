@@ -50,6 +50,7 @@ CONTAINS
       integer,          intent(out) :: errflg
 
       real(kind_phys) :: ftem(ncol,pver)
+      integer :: i, k
 
       errmsg = ''
       errflg = 0
@@ -57,8 +58,17 @@ CONTAINS
       call history_out_field('ZMMTU', windu_tend)
       call history_out_field('ZMMTV', windv_tend)
 
-      ftem(:ncol,:pver) = seten(:ncol,:pver)/cpair
+      ! Runs on the device: history_out_field accumulates device data in
+      ! place (gpu-history-accumulate). Same arithmetic as before.
+      !$acc data present(seten) create(ftem)
+      !$acc parallel loop collapse(2)
+      do k = 1, pver
+         do i = 1, ncol
+            ftem(i,k) = seten(i,k)/cpair
+         end do
+      end do
       call history_out_field('ZMMTT', ftem)
+      !$acc end data
 
    end subroutine zm_momtran_tendency_diagnostics_run
 

@@ -27,6 +27,8 @@
 [ccpp-arg-table]
   name  = cloud_water_paths_diagnostics_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ ncol ]
   standard_name = horizontal_loop_extent
   units = count
@@ -63,36 +65,42 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ icwmr ]
   standard_name = in_cloud_liquid_water_mixing_ratio_wrt_moist_air_and_condensed_water
   units = kg kg-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ iwc ]
   standard_name = gridbox_mean_ice_water_content
   units = kg m-3
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ lwc ]
   standard_name = gridbox_mean_liquid_water_content
   units = kg m-3
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ cldfsnow ]
   standard_name = liquid_plus_snow_stratiform_cloud_area_fraction
   units = fraction
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ cldfgrau ]
   standard_name = liquid_plus_graupel_stratiform_cloud_area_fraction
   units = fraction
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ one_mom_clouds ]
   standard_name = is_one_moment_cloud_microphysics
   units = flag

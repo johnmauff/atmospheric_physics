@@ -62,12 +62,25 @@ contains
 
       real(kind_phys),    parameter   :: rhofw = 1000._kind_phys  ! density of fresh water [kg m-3]
       real(kind_phys) :: prec_sed(ncol)
-
-      ! repeat computation of prec_sed here for diagnostics [m s-1]
-      prec_sed(:ncol) = sfliq(:ncol)/rhofw + snow_sed(:ncol)
+      real(kind_phys) :: rain_sed(size(sfliq))   ! sfliq converted to m s-1
+      integer :: i
 
       errmsg = ''
       errflg = 0
+
+      ! Runs on the device: history_out_field accumulates device data in
+      ! place (gpu-history-accumulate). Same arithmetic as before.
+      !$acc data present(sfliq, snow_sed) create(prec_sed, rain_sed)
+
+      ! repeat computation of prec_sed here for diagnostics [m s-1]
+      !$acc parallel loop
+      do i = 1, ncol
+         prec_sed(i) = sfliq(i)/rhofw + snow_sed(i)
+      end do
+      !$acc parallel loop
+      do i = 1, size(sfliq)
+         rain_sed(i) = sfliq(i)/rhofw
+      end do
 
       ! History out field calls
       call history_out_field('DQSED'  , wvtend)
@@ -77,7 +90,8 @@ contains
 
       call history_out_field('PRECSED', prec_sed) ! calculated as m s-1
       call history_out_field('SNOWSED', snow_sed) ! already in m s-1
-      call history_out_field('RAINSED', sfliq/rhofw) ! convert from kg m-2 s-1 to m s-1 (precip units) for output
+      call history_out_field('RAINSED', rain_sed) ! convert from kg m-2 s-1 to m s-1 (precip units) for output
+      !$acc end data
 
    end subroutine cloud_particle_sedimentation_diagnostics_run
 

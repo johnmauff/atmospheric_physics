@@ -66,6 +66,9 @@ contains
       ! Local variables for constituent indices
       integer :: const_wv_idx, const_cldliq_idx, const_cldice_idx
 
+      real(kind_phys) :: ttgw(size(tend_s,1), size(tend_s,2)) ! tend_s/cpairv [K s-1]
+      integer :: i, k
+
       errmsg = ''
       errflg = 0
 
@@ -84,7 +87,17 @@ contains
 
       ! History out field calls
       call history_out_field('EKGW', egwdffi_tot)
-      call history_out_field('TTGW', tend_s/cpairv)
+      ! Runs on the device: history_out_field accumulates device data in
+      ! place (gpu-history-accumulate). Same arithmetic as before.
+      !$acc data present(tend_s, cpairv) create(ttgw)
+      !$acc parallel loop collapse(2)
+      do k = 1, size(ttgw,2)
+         do i = 1, size(ttgw,1)
+            ttgw(i,k) = tend_s(i,k)/cpairv(i,k)
+         end do
+      end do
+      call history_out_field('TTGW', ttgw)
+      !$acc end data
       call history_out_field('UTGW_TOTAL', tend_u)
       call history_out_field('VTGW_TOTAL', tend_v)
 

@@ -131,15 +131,36 @@ CONTAINS
       errmsg = ''
       errflg = 0
 
-      mu_out(:,:) = 0._kind_phys
-      md_out(:,:) = 0._kind_phys
+      ! Runs on the device: inputs are device-resident, the scattered fields
+      ! are device-only locals, and history_out_field accumulates device data
+      ! in place (gpu-history-accumulate). Same arithmetic as before.
+      !$acc data present(ideep, mu, md, ps, pap, maxg, jt) &
+      !$acc      create(freqzm, pcont, pconb, mu_out, md_out)
 
-      lengath = count(ideep > 0)
+      lengath = 0
+      !$acc parallel loop reduction(+:lengath)
+      do i = 1, size(ideep)
+         if (ideep(i) > 0) lengath = lengath + 1
+      end do
       if (lengath > ncol) lengath = ncol  ! should not happen, but force it to not be larger than ncol for safety sake
 
       call history_out_field('CAPE', cape)
 
-      freqzm(:) = 0._kind_phys
+      !$acc parallel loop
+      do i = 1, ncol
+         freqzm(i) = 0._kind_phys
+         pcont(i) = ps(i)
+         pconb(i) = ps(i)
+      end do
+      !$acc parallel loop collapse(2)
+      do k = 1, pver
+         do i = 1, ncol
+            mu_out(i,k) = 0._kind_phys
+            md_out(i,k) = 0._kind_phys
+         end do
+      end do
+      ! ideep(1:lengath) are distinct columns, so the scatters run in parallel
+      !$acc parallel loop
       do i = 1,lengath
          freqzm(ideep(i)) = 1.0_kind_phys
       end do
@@ -150,6 +171,7 @@ CONTAINS
 
    ! Store upward and downward mass fluxes in un-gathered arrays
    ! + convert from hPa s-1 to kg m-2 s-1
+   !$acc parallel loop collapse(2) private(ii)
    do i=1,lengath
       do k=1,pver
          ii = ideep(i)
@@ -163,8 +185,7 @@ CONTAINS
 
    call history_out_field('DLFZM'   ,dlf)
 
-   pcont(:ncol) = ps(:ncol)
-   pconb(:ncol) = ps(:ncol)
+   !$acc parallel loop
    do i = 1,lengath
        if (maxg(i).gt.jt(i)) then
           pcont(ideep(i)) = pap(ideep(i),jt(i))  ! gathered array (or jctop ungathered)
@@ -194,6 +215,7 @@ CONTAINS
    call history_out_field('ZMICUD', icwdu)
    call history_out_field('ZMICVU', icwuv)
    call history_out_field('ZMICVD', icwdv)
+   !$acc end data
 
    end subroutine zm_diagnostics_run
 

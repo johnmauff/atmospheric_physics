@@ -23,6 +23,8 @@
 [ccpp-arg-table]
   name  = zm_evap_tendency_diagnostics_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ ncol ]
   standard_name = horizontal_loop_extent
   units = count
@@ -59,6 +61,7 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ heat ]
   standard_name = tendency_of_dry_air_enthalpy_at_constant_pressure
   units = J kg-1 s-1

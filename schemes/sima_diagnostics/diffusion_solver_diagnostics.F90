@@ -244,7 +244,22 @@ contains
            const_cldice_idx, errflg, errmsg)
       if (errflg /= 0) return
 
+      ! Everything below runs on the device: inputs are device-resident, the
+      ! local diagnostics are device-only, and history_out_field accumulates
+      ! device data in place (gpu-history-accumulate).
+      !$acc data present(pmid, pint, zi, zm, kvh, kvm, cgh, cgs, cam_in_shf, &
+      !$acc              cam_in_cflx, tautotx, tautoty, t0, q0, s0, u0, v0, q1, s1, &
+      !$acc              u1, v1, dtk, tend_s, tend_u, tend_v, tend_q) &
+      !$acc      create(qt_pre_PBL, sl_pre_PBL, slv_pre_PBL, rh_pre_PBL, qt_aft_PBL, &
+      !$acc             sl_aft_PBL, slv_aft_PBL, qv_aft_PBL, ql_aft_PBL, qi_aft_PBL, &
+      !$acc             t_aft_PBL, rh_aft_PBL, u_aft_PBL, v_aft_PBL, slflx, qtflx, uflx, &
+      !$acc             vflx, slflx_cg, qtflx_cg, uflx_cg, vflx_cg, slten, qtten, tten, &
+      !$acc             rhten, dtvke, dtv, cam_in_cflx_wv, cam_in_cflx_cldliq, &
+      !$acc             cam_in_cflx_cldice, q0_wv, q0_cldliq, q0_cldice, q1_cldliq, &
+      !$acc             q1_cldice, tend_q_wv, tend_q_cldliq, tend_q_cldice)
+
       ! Extract constituent fluxes from coupler upward constituent fluxes
+      !$acc kernels
       if(const_wv_idx > 0) then
         cam_in_cflx_wv(:ncol)     = cam_in_cflx(:ncol, const_wv_idx)
         q0_wv(:ncol, :)           = q0(:ncol, :, const_wv_idx)
@@ -278,6 +293,7 @@ contains
         q1_cldice(:ncol, :) = 0._kind_phys
         tend_q_cldice(:ncol, :) = 0._kind_phys
       endif
+      !$acc end kernels
 
       ! Call the diagnostic profile calculation subroutine
       call vertical_diffusion_diagnostic_profiles( &
@@ -414,15 +430,18 @@ contains
 
       ! Normalize kinetic energy dissipation heating for history output
       ! Convert from [J kg-1] to [K s-1]
+      !$acc kernels
       dtvke(:ncol, :pver) = dtk(:ncol, :pver) / cpair / dt
 
       ! Normalize dry static energy tendency for history output
       ! Convert from [J kg-1 s-1] to [K s-1]
       dtv(:ncol, :pver) = tend_s(:ncol, :pver) / cpair
+      !$acc end kernels
 
       ! Output diagnostics
       call history_out_field('DTVKE', dtvke)
       call history_out_field('DTV',   dtv)
+      !$acc end data
 
   end subroutine vertical_diffusion_tendencies_diagnostics_run
 

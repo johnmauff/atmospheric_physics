@@ -92,27 +92,39 @@ contains
       real(kind_phys) :: tgliqwp(ncol)      ! Vertically integrated liquid water path [kg m-2]
       real(kind_phys) :: tgwp(ncol)         ! Vertically integrated (total) cloud water path [kg m-2]
 
-      integer :: k
+      integer :: i, k
 
       errmsg = ''
       errflg = 0
 
+      ! Runs on the device: history_out_field accumulates device data in
+      ! place (gpu-history-accumulate). Same arithmetic and sum order as before.
+      !$acc data present(cld, iciwp, iclwp) &
+      !$acc      create(gicewp, gliqwp, gwp, cwp, tgicewp, tgliqwp, tgwp)
+
       ! The in-cloud ice/liquid paths are the radiation inputs iciwp/iclwp;
       ! the grid-box paths are those weighted by cloud fraction.
-      gicewp(:ncol,:pver) = iciwp(:ncol,:pver)*cld(:ncol,:pver)
-      gliqwp(:ncol,:pver) = iclwp(:ncol,:pver)*cld(:ncol,:pver)
-
-      tgicewp(:ncol) = 0._kind_phys
-      tgliqwp(:ncol) = 0._kind_phys
-
+      !$acc parallel loop collapse(2)
       do k = 1, pver
-         tgicewp(:ncol) = tgicewp(:ncol) + gicewp(:ncol,k)
-         tgliqwp(:ncol) = tgliqwp(:ncol) + gliqwp(:ncol,k)
+         do i = 1, ncol
+            gicewp(i,k) = iciwp(i,k)*cld(i,k)
+            gliqwp(i,k) = iclwp(i,k)*cld(i,k)
+            gwp(i,k) = gicewp(i,k) + gliqwp(i,k)
+            cwp(i,k) = iciwp(i,k) + iclwp(i,k)
+         end do
       end do
 
-      tgwp(:ncol) = tgicewp(:ncol) + tgliqwp(:ncol)
-      gwp(:ncol,:pver) = gicewp(:ncol,:pver) + gliqwp(:ncol,:pver)
-      cwp(:ncol,:pver) = iciwp(:ncol,:pver) + iclwp(:ncol,:pver)
+      !$acc parallel loop
+      do i = 1, ncol
+         tgicewp(i) = 0._kind_phys
+         tgliqwp(i) = 0._kind_phys
+         !$acc loop seq
+         do k = 1, pver
+            tgicewp(i) = tgicewp(i) + gicewp(i,k)
+            tgliqwp(i) = tgliqwp(i) + gliqwp(i,k)
+         end do
+         tgwp(i) = tgicewp(i) + tgliqwp(i)
+      end do
 
       ! History out field calls
       ! (one-moment: ICWMR/ICIMR/IWC/LWC are owned by rk_stratiform_diagnostics)
@@ -128,6 +140,7 @@ contains
       call history_out_field('TGCLDIWP', tgicewp)
       call history_out_field('ICLDTWP',  cwp)
       call history_out_field('ICLDIWP',  iciwp)
+      !$acc end data
       call history_out_field('CLDFSNOW', cldfsnow)
       call history_out_field('CLDFGRAU', cldfgrau)
 

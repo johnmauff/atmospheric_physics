@@ -216,7 +216,7 @@ contains
       !-----------------------------------------------------------------
       ! Local variables
       !-----------------------------------------------------------------
-      integer :: icol, i, iaer
+      integer :: icol, i, iaer, k, ib
       integer :: ilist
 
       ! Derived column quantities
@@ -257,66 +257,100 @@ contains
       errmsg = ''
       errflg = 0
 
-      !-----------------------------------------------------------------
-      ! Derived quantities
-      !-----------------------------------------------------------------
-      mass(:ncol, :) = pdeldry(:ncol, :) * rga
-      air_density(:ncol, :) = pmid(:ncol, :) / (rair * t(:ncol, :))
+      ! Runs on the device: history_out_field accumulates device data in
+      ! place (gpu-history-accumulate). Same arithmetic as before; the column
+      ! sums are sequential loops over levels (and bands) in the order of
+      ! the former sum() intrinsics. rad_aer_diag_out (aerosol_mmr_host) also
+      ! runs on the device, on the constituents and pdeldry mapped here.
+      !$acc data present(aer_tau, aer_tau_w, aer_lw_abs, pmid, t, troplev,    &
+      !$acc              idxnite, dustaod, sulfaod, bcaod, pomaod, soaaod,      &
+      !$acc              ssltaod, aodabsbc, burdendust, burdenso4, burdenbc,    &
+      !$acc              burdenpom, burdensoa, burdenseasalt, ssavis, aodvis,   &
+      !$acc              odv_col_aod, pdeldry, constituents)                    &
+      !$acc      create(aodvis_l, aoduv, aodnir, aodabs, aodtot, ssavis_l,      &
+      !$acc             aodvisst, aoduvst, aodnirst, mass, air_density,         &
+      !$acc             extinct, extinctuv, extinctnir, absorb, totabslw,       &
+      !$acc             aodabslw, odv_tmp, dustaod_l, sulfaod_l, bcaod_l,       &
+      !$acc             pomaod_l, soaaod_l, ssltaod_l, aodabsbc_l,              &
+      !$acc             burdendust_l, burdenso4_l, burdenbc_l, burdenpom_l,     &
+      !$acc             burdensoa_l, burdenseasalt_l)
 
       !-----------------------------------------------------------------
-      ! Column AODs (sum over levels)
+      ! Derived quantities, per-level extinction [m-1] and absorption
+      ! [m-1], LW diagnostics
       !-----------------------------------------------------------------
-      ! aodvis and ssavis are already computed in aerosol_optics_run
-      aodvis_l(:ncol) = aodvis(:ncol)
-      ssavis_l(:ncol) = ssavis(:ncol)
-
-      do icol = 1, ncol
-        aoduv(icol)     = sum(aer_tau(icol, :, idx_uv_diag))
-        aodnir(icol)    = sum(aer_tau(icol, :, idx_nir_diag))
-        aodabs(icol)    = sum(aer_tau(icol, :, idx_sw_diag) - aer_tau_w(icol, :, idx_sw_diag))
-        aodtot(icol)    = sum(aer_tau(icol, :, :))
+      !$acc parallel loop collapse(2)
+      do k = 1, pver
+        do icol = 1, ncol
+          mass(icol,k) = pdeldry(icol,k) * rga
+          air_density(icol,k) = pmid(icol,k) / (rair * t(icol,k))
+          extinct(icol,k)    = aer_tau(icol,k,idx_sw_diag) * air_density(icol,k) / mass(icol,k)
+          extinctuv(icol,k)  = aer_tau(icol,k,idx_uv_diag) * air_density(icol,k) / mass(icol,k)
+          extinctnir(icol,k) = aer_tau(icol,k,idx_nir_diag) * air_density(icol,k) / mass(icol,k)
+          absorb(icol,k)     = (aer_tau(icol,k,idx_sw_diag) - aer_tau_w(icol,k,idx_sw_diag)) &
+                               * air_density(icol,k) / mass(icol,k)
+          totabslw(icol,k) = 0._kind_phys
+          !$acc loop seq
+          do ib = 1, size(aer_lw_abs, 3)
+            totabslw(icol,k) = totabslw(icol,k) + aer_lw_abs(icol,k,ib)
+          end do
+          aodabslw(icol,k) = aer_lw_abs(icol,k,idx_lw_diag)
+        end do
       end do
 
       !-----------------------------------------------------------------
-      ! Stratospheric column AODs (levels above tropopause)
+      ! Column AODs (sum over levels), stratospheric column AODs (levels
+      ! above the tropopause), copies of the per-species fields for
+      ! fillvalue modification
       !-----------------------------------------------------------------
+      !$acc parallel loop
       do icol = 1, ncol
-        aodvisst(icol) = sum(aer_tau(icol, 1:troplev(icol), idx_sw_diag))
-        aoduvst(icol)  = sum(aer_tau(icol, 1:troplev(icol), idx_uv_diag))
-        aodnirst(icol) = sum(aer_tau(icol, 1:troplev(icol), idx_nir_diag))
+        ! aodvis and ssavis are already computed in aerosol_optics_run
+        aodvis_l(icol) = aodvis(icol)
+        ssavis_l(icol) = ssavis(icol)
+
+        aoduv(icol)  = 0._kind_phys
+        aodnir(icol) = 0._kind_phys
+        aodabs(icol) = 0._kind_phys
+        !$acc loop seq
+        do k = 1, size(aer_tau, 2)
+          aoduv(icol)  = aoduv(icol)  + aer_tau(icol,k,idx_uv_diag)
+          aodnir(icol) = aodnir(icol) + aer_tau(icol,k,idx_nir_diag)
+          aodabs(icol) = aodabs(icol) + (aer_tau(icol,k,idx_sw_diag) - aer_tau_w(icol,k,idx_sw_diag))
+        end do
+        aodtot(icol) = 0._kind_phys
+        !$acc loop seq
+        do ib = 1, size(aer_tau, 3)
+          !$acc loop seq
+          do k = 1, size(aer_tau, 2)
+            aodtot(icol) = aodtot(icol) + aer_tau(icol,k,ib)
+          end do
+        end do
+
+        aodvisst(icol) = 0._kind_phys
+        aoduvst(icol)  = 0._kind_phys
+        aodnirst(icol) = 0._kind_phys
+        !$acc loop seq
+        do k = 1, troplev(icol)
+          aodvisst(icol) = aodvisst(icol) + aer_tau(icol,k,idx_sw_diag)
+          aoduvst(icol)  = aoduvst(icol)  + aer_tau(icol,k,idx_uv_diag)
+          aodnirst(icol) = aodnirst(icol) + aer_tau(icol,k,idx_nir_diag)
+        end do
+
+        dustaod_l(icol)       = dustaod(icol)
+        sulfaod_l(icol)       = sulfaod(icol)
+        bcaod_l(icol)         = bcaod(icol)
+        pomaod_l(icol)        = pomaod(icol)
+        soaaod_l(icol)        = soaaod(icol)
+        ssltaod_l(icol)       = ssltaod(icol)
+        aodabsbc_l(icol)      = aodabsbc(icol)
+        burdendust_l(icol)    = burdendust(icol)
+        burdenso4_l(icol)     = burdenso4(icol)
+        burdenbc_l(icol)      = burdenbc(icol)
+        burdenpom_l(icol)     = burdenpom(icol)
+        burdensoa_l(icol)     = burdensoa(icol)
+        burdenseasalt_l(icol) = burdenseasalt(icol)
       end do
-
-      !-----------------------------------------------------------------
-      ! Per-level extinction [m-1] and absorption [m-1]
-      !-----------------------------------------------------------------
-      extinct(:ncol, :)    = aer_tau(:ncol, :, idx_sw_diag) * air_density(:ncol, :) / mass(:ncol, :)
-      extinctuv(:ncol, :)  = aer_tau(:ncol, :, idx_uv_diag) * air_density(:ncol, :) / mass(:ncol, :)
-      extinctnir(:ncol, :) = aer_tau(:ncol, :, idx_nir_diag) * air_density(:ncol, :) / mass(:ncol, :)
-      absorb(:ncol, :)     = (aer_tau(:ncol, :, idx_sw_diag) - aer_tau_w(:ncol, :, idx_sw_diag)) &
-                             * air_density(:ncol, :) / mass(:ncol, :)
-
-      !-----------------------------------------------------------------
-      ! LW diagnostics
-      !-----------------------------------------------------------------
-      totabslw(:ncol, :) = sum(aer_lw_abs(:ncol, :, :), dim=3)
-      aodabslw(:ncol, :) = aer_lw_abs(:ncol, :, idx_lw_diag)
-
-      !-----------------------------------------------------------------
-      ! Copy per-species fields for fillvalue modification
-      !-----------------------------------------------------------------
-      dustaod_l(:ncol)       = dustaod(:ncol)
-      sulfaod_l(:ncol)       = sulfaod(:ncol)
-      bcaod_l(:ncol)         = bcaod(:ncol)
-      pomaod_l(:ncol)        = pomaod(:ncol)
-      soaaod_l(:ncol)        = soaaod(:ncol)
-      ssltaod_l(:ncol)       = ssltaod(:ncol)
-      aodabsbc_l(:ncol)      = aodabsbc(:ncol)
-      burdendust_l(:ncol)    = burdendust(:ncol)
-      burdenso4_l(:ncol)     = burdenso4(:ncol)
-      burdenbc_l(:ncol)      = burdenbc(:ncol)
-      burdenpom_l(:ncol)     = burdenpom(:ncol)
-      burdensoa_l(:ncol)     = burdensoa(:ncol)
-      burdenseasalt_l(:ncol) = burdenseasalt(:ncol)
 
       !-----------------------------------------------------------------
       ! Output day+night (dn) variants first (all columns valid)
@@ -363,7 +397,9 @@ contains
 
       !-----------------------------------------------------------------
       ! Apply fillvalue to night columns for day-only variants
+      ! (idxnite(1:nnite) are distinct columns)
       !-----------------------------------------------------------------
+      !$acc parallel loop
       do i = 1, nnite
         aodvis_l(idxnite(i))  = fillvalue
         aoduv(idxnite(i))     = fillvalue
@@ -374,11 +410,6 @@ contains
         aodvisst(idxnite(i))  = fillvalue
         aoduvst(idxnite(i))   = fillvalue
         aodnirst(idxnite(i))  = fillvalue
-
-        extinct(idxnite(i), :)    = fillvalue
-        extinctuv(idxnite(i), :)  = fillvalue
-        extinctnir(idxnite(i), :) = fillvalue
-        absorb(idxnite(i), :)     = fillvalue
 
         dustaod_l(idxnite(i))       = fillvalue
         sulfaod_l(idxnite(i))       = fillvalue
@@ -394,6 +425,15 @@ contains
         burdenpom_l(idxnite(i))     = fillvalue
         burdensoa_l(idxnite(i))     = fillvalue
         burdenseasalt_l(idxnite(i)) = fillvalue
+      end do
+      !$acc parallel loop collapse(2)
+      do k = 1, pver
+        do i = 1, nnite
+          extinct(idxnite(i), k)    = fillvalue
+          extinctuv(idxnite(i), k)  = fillvalue
+          extinctnir(idxnite(i), k) = fillvalue
+          absorb(idxnite(i), k)     = fillvalue
+        end do
       end do
 
       !-----------------------------------------------------------------
@@ -441,7 +481,11 @@ contains
 
       ! Per-aerosol visible OD (ODV_<name>), day-only with fillvalue
       do iaer = 1, min(num_bulk_aer, num_odv)
-        odv_tmp(:ncol) = odv_col_aod(:ncol, iaer)
+        !$acc parallel loop
+        do icol = 1, ncol
+          odv_tmp(icol) = odv_col_aod(icol, iaer)
+        end do
+        !$acc parallel loop
         do i = 1, nnite
           odv_tmp(idxnite(i)) = fillvalue
         end do
@@ -454,6 +498,8 @@ contains
           call rad_aer_diag_out(ilist, constituents, pdeldry, ncol)
         end if
       end do
+
+      !$acc end data
 
    end subroutine aerosol_optics_diagnostics_run
 

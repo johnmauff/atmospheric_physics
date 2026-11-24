@@ -27,66 +27,78 @@
 [ccpp-arg-table]
   name  = sima_state_diagnostics_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ ps ]
   standard_name = surface_air_pressure
   units = Pa
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ psdry ]
   standard_name = surface_pressure_of_dry_air
   units = Pa
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ phis ]
   standard_name = surface_geopotential
   units = m2 s-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ T ]
   standard_name = air_temperature
   units = K
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ u ]
   standard_name = eastward_wind
   units = m s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ v ]
   standard_name = northward_wind
   units = m s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ dse ]
   standard_name = dry_static_energy
   units = J kg-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ omega ]
   standard_name = lagrangian_tendency_of_air_pressure
   units = Pa s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ pmid ]
   standard_name = air_pressure
   units = Pa
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ pmiddry ]
   standard_name = air_pressure_of_dry_air
   units = Pa
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ pdel ]
   standard_name = air_pressure_thickness
   units = Pa
@@ -99,72 +111,84 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ rpdel ]
   standard_name = reciprocal_of_air_pressure_thickness
   units = Pa-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ rpdeldry ]
   standard_name = reciprocal_of_air_pressure_thickness_of_dry_air
   units = Pa-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ lnpmid ]
   standard_name = ln_air_pressure
   units = 1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ lnpmiddry ]
   standard_name = ln_air_pressure_of_dry_air
   units = 1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ inv_exner ]
   standard_name = reciprocal_of_dimensionless_exner_function_wrt_surface_air_pressure
   units = 1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ zm ]
   standard_name = geopotential_height_wrt_surface
   units = m
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ pint ]
   standard_name = air_pressure_at_interface
   units = Pa
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ pintdry ]
   standard_name = air_pressure_of_dry_air_at_interface
   units = Pa
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ lnpint ]
   standard_name = ln_air_pressure_at_interface
   units = 1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ lnpintdry ]
   standard_name = ln_air_pressure_of_dry_air_at_interface
   units = 1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ zi ]
   standard_name = geopotential_height_wrt_surface_at_interface
   units = m
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_interface_dimension)
   intent = in
+  memory_space = device
 [ gravit ]
   standard_name = standard_gravitational_acceleration
   units = m s-2

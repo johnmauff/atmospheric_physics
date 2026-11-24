@@ -190,6 +190,7 @@ CONTAINS
       logical :: const_found(size(const_props))
       integer :: k
       real(kind_phys) :: tmq(size(pdel, 1))         ! vertically integrated water vapor
+      integer :: i, iq
 
       errmsg = ''
       errflg = 0
@@ -221,12 +222,21 @@ CONTAINS
 
       if (wv_idx > 0) then
          ! Column water vapor, as in CAM: sum of q * pdel / g over the layers
-         tmq(:) = 0._kind_phys
-         do k = 1, size(pdel, 2)
-            tmq(:) = tmq(:) + const_array(:, k, wv_idx) * pdel(:, k)
+         ! Runs on the device: history_out_field accumulates device data
+         ! in place (gpu-history-accumulate). Same sum order as before.
+         iq = wv_idx   ! local copy: no module variable in device code
+         !$acc data present(const_array, pdel) create(tmq)
+         !$acc parallel loop
+         do i = 1, size(pdel, 1)
+            tmq(i) = 0._kind_phys
+            !$acc loop seq
+            do k = 1, size(pdel, 2)
+               tmq(i) = tmq(i) + const_array(i, k, iq) * pdel(i, k)
+            end do
+            tmq(i) = tmq(i) / gravit
          end do
-         tmq(:) = tmq(:) / gravit
          call history_out_field('TMQ', tmq)
+         !$acc end data
       end if
 
       ! Capture expected constituent fields

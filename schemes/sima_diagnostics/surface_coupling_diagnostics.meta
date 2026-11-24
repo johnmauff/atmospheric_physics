@@ -21,6 +21,8 @@
 [ccpp-arg-table]
   name  = surface_coupling_diagnostics_run
   type  = scheme
+  # memory_space = device below: arguments passed unchanged to history_out_field,
+  # which accumulates device data on the device (gpu-history-accumulate)
 [ ncol ]
   standard_name = horizontal_loop_extent
   units = count
@@ -63,36 +65,42 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ shf ]
   standard_name = surface_upward_sensible_heat_flux_from_coupler
   units = W m-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ lhf ]
   standard_name = surface_upward_latent_heat_flux_from_coupler
   units = W m-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ cflx ]
   standard_name = surface_upward_ccpp_constituent_fluxes_from_coupler
   units = kg m-2 s-1
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, number_of_ccpp_constituents)
   intent = in
+  memory_space = device
 [ wsx ]
   standard_name = surface_eastward_wind_stress_from_coupler
   units = N m-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ wsy ]
   standard_name = surface_northward_wind_stress_from_coupler
   units = N m-2
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  memory_space = device
 [ errmsg ]
   standard_name = ccpp_error_message
   units = none
