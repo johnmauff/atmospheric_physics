@@ -507,8 +507,15 @@ contains
     if (.not. has_prescribed_aerosols) return
 
     ! Advance tracer_data to current time
+    ! zi is device data; tracer_data reads it on the host only for
+    ! altitude-level files (alt_data), so refresh the host copy just then.
+    !$acc data present(zi)
+    if (tracer_data_file%alt_data) then
+      !$acc update self(zi)
+    end if
     call advance_trcdata(tracer_data_fields, tracer_data_file, &
                          pmid, pint, phis, zi)
+    !$acc end data
 
     ! Copy the prescribed aerosol data to constituent array
     ! Loop over aero_map_list to retrieve data from tracer_data_fields.

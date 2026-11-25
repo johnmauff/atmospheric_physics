@@ -194,12 +194,16 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+  # memory_space = device below: the only host use of temp is the 2-D
+  # sections passed to wv_saturation (cldfrc_ice branch), whose vector
+  # routines map them with copyin, so they find the device copy present
 [ temp ]
   standard_name = air_temperature
   units = K
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
+  memory_space = device
 [ sst ]
   standard_name = sea_surface_temperature_from_coupler
   units = K

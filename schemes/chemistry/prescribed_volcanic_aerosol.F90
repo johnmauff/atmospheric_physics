@@ -294,8 +294,15 @@ contains
     if (.not. has_prescribed_volcaero) return
 
     ! Advance tracer_data to current time
+    ! zi is device data; tracer_data reads it on the host only for
+    ! altitude-level files (alt_data), so refresh the host copy just then.
+    !$acc data present(zi)
+    if (tracer_data_file%alt_data) then
+      !$acc update self(zi)
+    end if
     call advance_trcdata(tracer_data_fields, tracer_data_file, &
                          pmid, pint, phis, zi)
+    !$acc end data
 
     ! Get constituent indices for MMR and radius
     call ccpp_constituent_index(volcaero_const_name, &
